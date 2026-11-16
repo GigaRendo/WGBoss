@@ -42,6 +42,14 @@ public final class Rewards {
         }
     }
 
+    /** Items rolled individually for every participant (e.g. a small chance at a totem). */
+    public static List<ItemStack> rollPerPlayer(Boss b) {
+        List<ItemStack> out = new ArrayList<>();
+        String key = WGBosses.config.tiers.get(b.trueTier).name.toLowerCase(Locale.ROOT);
+        fromEntries(out, WGBosses.config.perPlayerRewards.get(key));
+        return out;
+    }
+
     public static Result roll(Boss b) {
         Config c = WGBosses.config;
         Config.TierDef t = c.tiers.get(b.trueTier);
