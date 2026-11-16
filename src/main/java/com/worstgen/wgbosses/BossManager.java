@@ -45,11 +45,6 @@ public final class BossManager {
         public String personality;
     }
 
-    private static final class ChestRec {
-        final ServerLevel level; final BlockPos pos; final long expire;
-        ChestRec(ServerLevel l, BlockPos p, long e) { level = l; pos = p; expire = e; }
-    }
-
     private final Set<String> persisted = new HashSet<>();
 
     public static EntityType<?> byId(String id) {
@@ -89,7 +84,6 @@ public final class BossManager {
 
     private final List<Entity> toDiscard = new ArrayList<>();
     private final List<Entity> orphanCheck = new ArrayList<>();
-    private final List<ChestRec> chests = new ArrayList<>();
     private final Set<Integer> warned = new HashSet<>();
     private List<EntityType<?>> pool;
     private long nextSpawn = -1;
@@ -104,7 +98,7 @@ public final class BossManager {
         tick = 0;
         nextSpawn = -1;
         pool = null;
-        bosses.clear(); byMob.clear(); minionOwner.clear(); chests.clear();
+        bosses.clear(); byMob.clear(); minionOwner.clear();
     }
 
     public void shutdown() {
@@ -116,7 +110,7 @@ public final class BossManager {
         bosses.clear(); byMob.clear(); minionOwner.clear();
     }
 
-    private void scheduleNext() {
+    public void scheduleNext() {
         Config c = cfg();
         nextSpawn = tick + Util.rint(c.spawnMinMinutes * 1200, c.spawnMaxMinutes * 1200);
         nextBlood = Util.chance(c.bloodMoonChance);
@@ -156,9 +150,7 @@ public final class BossManager {
             }
         }
 
-        if (tick % 20 == 0) tickChests();
-
-        if (bosses.isEmpty() && tick % 20 == 0) {
+        if (bosses.isEmpty() && tick % 20 == 0 && c.autoSpawn) {
             int online = server.getPlayerList().getPlayerCount();
             long remaining = nextSpawn - tick;
             if (online >= c.minPlayers) {
@@ -467,19 +459,9 @@ public final class BossManager {
         Util.sound(lvl, pos.x, pos.y, pos.z, SoundEvents.ENDER_DRAGON_DEATH, 3f, 1f);
         say(b, "death", killer, true);
 
-        // rewards
+        // rewards: split between everyone who fought, top damage dealer gets a bonus
         Rewards.Result rr = Rewards.roll(b);
-        List<ItemStack> chest = new ArrayList<>(rr.chest());
-        boolean bonusDirect = top != null && top.isAlive();
-        if (bonusDirect) {
-            for (ItemStack s : rr.bonus()) {
-                if (!top.getInventory().add(s)) Block.popResource(lvl, top.blockPosition(), s);
-            }
-        } else {
-            chest.addAll(rr.bonus());
-        }
-        placeChest(lvl, pos, chest);
-        if (rr.xp() > 0) ExperienceOrb.award(lvl, pos, rr.xp());
+        distribute(b, sorted, topId, rr);
 
         // chat
         Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" has been defeated!").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD)));
@@ -491,12 +473,7 @@ public final class BossManager {
         }
         if (topId != null) {
             Util.broadcast(server, prefix().append(Component.literal(nameOf(topId) + " dealt the most damage and earns bonus rewards!").withStyle(ChatFormatting.LIGHT_PURPLE)));
-            if (!rr.bonus().isEmpty()) {
-                Util.broadcast(server, Component.literal("  Bonus: ").withStyle(ChatFormatting.LIGHT_PURPLE).append(Rewards.describe(rr.bonus()).copy().withStyle(ChatFormatting.WHITE)));
-            }
         }
-        Util.broadcast(server, Component.literal("  Chest loot: ").withStyle(ChatFormatting.GOLD).append(Rewards.describe(rr.chest()).copy().withStyle(ChatFormatting.WHITE)));
-        if (rr.xp() > 0) Util.broadcast(server, Component.literal("  +" + rr.xp() + " XP dropped").withStyle(ChatFormatting.GREEN));
 
         // stats
         Config c = cfg();
@@ -516,57 +493,50 @@ public final class BossManager {
         removeBoss(b);
     }
 
+    private void give(ServerPlayer p, net.minecraft.world.item.Item item, int count) {
+        int max = Math.max(1, new ItemStack(item, 1).getMaxStackSize());
+        while (count > 0) {
+            int n = Math.min(max, count);
+            ItemStack st = new ItemStack(item, n);
+            if (!p.getInventory().add(st) && !st.isEmpty()) Block.popResource((ServerLevel) p.level(), p.blockPosition(), st);
+            count -= n;
+        }
+    }
+
+    private void distribute(Boss b, List<Map.Entry<UUID, Double>> sorted, UUID topId, Rewards.Result rr) {
+        double minDmg = b.maxHp * cfg().participationPercentForStats / 100.0;
+        List<ServerPlayer> part = new ArrayList<>();
+        List<Double> dmg = new ArrayList<>();
+        double total = 0;
+        for (Map.Entry<UUID, Double> e : sorted) {
+            ServerPlayer p = server.getPlayerList().getPlayer(e.getKey());
+            if (p == null || !p.isAlive() || e.getValue() < minDmg) continue;
+            part.add(p); dmg.add(e.getValue()); total += e.getValue();
+        }
+        if (part.isEmpty() || total <= 0) return;
+        ServerPlayer top = part.get(0); // sorted by damage, so the first online participant is the best one
+
+        Map<net.minecraft.world.item.Item, Integer> pool = new LinkedHashMap<>();
+        for (ItemStack st : rr.chest()) pool.merge(st.getItem(), st.getCount(), Integer::sum);
+        for (Map.Entry<net.minecraft.world.item.Item, Integer> e : pool.entrySet()) {
+            int totalCount = e.getValue(), given = 0;
+            int[] share = new int[part.size()];
+            for (int i = 0; i < part.size(); i++) { share[i] = (int) Math.floor(totalCount * dmg.get(i) / total); given += share[i]; }
+            share[0] += totalCount - given; // remainder to the top damage dealer
+            for (int i = 0; i < part.size(); i++) if (share[i] > 0) give(part.get(i), e.getKey(), share[i]);
+        }
+        for (ItemStack st : rr.bonus()) give(top, st.getItem(), st.getCount());
+        if (rr.xp() > 0) {
+            for (int i = 0; i < part.size(); i++) {
+                int x = (int) (rr.xp() * dmg.get(i) / total);
+                if (x > 0) ExperienceOrb.award((ServerLevel) part.get(i).level(), part.get(i).position(), x);
+            }
+        }
+    }
+
     private String nameOf(UUID id) {
         ServerPlayer p = server.getPlayerList().getPlayer(id);
         return p != null ? p.getName().getString() : WGBosses.stats.get(id, null).name;
-    }
-
-    // ------------------------------------------------------------------ chest
-    private void placeChest(ServerLevel lvl, Vec3 pos, List<ItemStack> items) {
-        BlockPos base = BlockPos.containing(pos);
-        BlockPos spot = null;
-        search:
-        for (int dy = 0; dy <= 3; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dz = -2; dz <= 2; dz++) {
-                    for (int sgn : new int[]{1, -1}) {
-                        BlockPos p = base.offset(dx, dy * sgn, dz);
-                        if (lvl.getBlockState(p).isAir() && !lvl.getBlockState(p.below()).getCollisionShape(lvl, p.below()).isEmpty()) { spot = p; break search; }
-                    }
-                }
-            }
-        }
-        List<ItemStack> overflow = new ArrayList<>();
-        if (spot != null) {
-            lvl.setBlock(spot, Blocks.CHEST.defaultBlockState(), 3);
-            BlockEntity be = lvl.getBlockEntity(spot);
-            if (be instanceof ChestBlockEntity ch) {
-                int slot = 0;
-                for (ItemStack s : items) {
-                    if (slot < 27) ch.setItem(slot++, s.copy()); else overflow.add(s);
-                }
-                chests.add(new ChestRec(lvl, spot, tick + cfg().chestLifetimeSeconds * 20L));
-            } else {
-                overflow.addAll(items);
-            }
-        } else {
-            overflow.addAll(items);
-        }
-        for (ItemStack s : overflow) Block.popResource(lvl, base, s);
-    }
-
-    private void tickChests() {
-        Iterator<ChestRec> it = chests.iterator();
-        while (it.hasNext()) {
-            ChestRec r = it.next();
-            if (!r.level.hasChunkAt(r.pos)) continue;
-            BlockEntity be = r.level.getBlockEntity(r.pos);
-            if (!(be instanceof ChestBlockEntity ch)) { it.remove(); continue; }
-            if (ch.isEmpty() || tick >= r.expire) {
-                r.level.setBlock(r.pos, Blocks.AIR.defaultBlockState(), 3);
-                it.remove();
-            }
-        }
     }
 
     // ------------------------------------------------------------------ teleport
