@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "wgbosses",
+  "version": "${version}",
+  "name": "WGBosses",
+  "description": "Random giant boss mobs for WorstGen SMP. Server-side only.",
+  "authors": ["WorstGen SMP"],
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": ["com.worstgen.wgbosses.WGBosses"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "placeholder-api": "*"
+  }
+}
