@@ -74,7 +74,9 @@ public final class Boss {
     private int skillT, dashLeft, transition, stuck;
     private Vec3 lastPos = Vec3.ZERO;
     private final List<Vec3> strikes = new ArrayList<>();
-    private boolean lowSaid;
+    private boolean lowSaid, leapHit;
+    private int airTicks;
+    private long rangedCd;
 
     Boss(BossManager mgr, int id, ServerLevel level, Mob mob, BossManager.Spec s, String name, int playersOnline) {
         Config c = WGBosses.config;
@@ -209,13 +211,44 @@ public final class Boss {
         return l;
     }
 
+    private boolean airborne(ServerPlayer p) {
+        return p != null && !p.onGround() && (p.getY() - mob.getY() > 3.5 || p.isFallFlying());
+    }
+
+    private int newTargetTicks() {
+        Config c = WGBosses.config;
+        return Util.rint(c.targetMinSeconds * 20, Math.max(c.targetMinSeconds, c.targetMaxSeconds) * 20);
+    }
+
+    private ServerPlayer nearestGrounded(List<ServerPlayer> ps) {
+        ServerPlayer best = null; double bd = Double.MAX_VALUE;
+        for (ServerPlayer p : ps) {
+            if (airborne(p)) continue;
+            double d = p.distanceToSqr(mob);
+            if (d < bd) { bd = d; best = p; }
+        }
+        return best;
+    }
+
+    private List<ServerPlayer> inRange(List<ServerPlayer> all) {
+        double r = WGBosses.config.targetRange;
+        List<ServerPlayer> l = new ArrayList<>();
+        for (ServerPlayer p : all) if (p.distanceToSqr(mob) <= r * r) l.add(p);
+        return l;
+    }
+
     private boolean valid(ServerPlayer p) {
         return p != null && p.isAlive() && !p.isSpectator() && p.level() == level;
     }
 
     private void hurt(ServerPlayer p, double amount) {
         if (!p.isAlive() || amount <= 0) return;
-        p.hurtServer(level, level.damageSources().mobAttack(mob), (float) amount);
+        double ratio = amount / Math.max(0.01, curDamage());
+        double pct = phaseTier(phase).hitPercent * (calamity ? 1 : 1 + 0.2 * (phase - 1)) * dmgMult;
+        double finalDmg = Math.max(1.0, p.getMaxHealth() * pct / 100.0 * ratio);
+        if (WGBosses.config.neverOneShot && p.getHealth() > 1.0f) finalDmg = Math.min(finalDmg, p.getHealth() - 1.0f);
+        DamageSource src = WGBosses.config.armorBypass ? level.damageSources().indirectMagic(mob, mob) : level.damageSources().mobAttack(mob);
+        p.hurtServer(level, src, (float) finalDmg);
     }
 
     private void puff(ParticleOptions p, int n) {
@@ -321,10 +354,15 @@ public final class Boss {
 
         if (transition > 0) { tickTransition(); return; }
 
-        List<ServerPlayer> ps = players();
+        List<ServerPlayer> ps = inRange(players());
         tickMinions(ps);
-        if (ps.isEmpty()) return;
+        if (ps.isEmpty()) { target = null; if (cur != null) endSkill(now); return; }
         validateTarget(ps, now);
+        airTicks = (target != null && airborne(target)) ? airTicks + 1 : 0;
+        if (cur == null && airTicks > 60) {
+            ServerPlayer g = nearestGrounded(ps);
+            if (g != null) { target = g; targetUntil = now + newTargetTicks(); airTicks = 0; }
+        }
         if (cur != null) tickSkill(now, ps); else maybeStartSkill(now, ps);
         move();
 
@@ -367,7 +405,7 @@ public final class Boss {
 
     // ------------------------------------------------------------------ targeting
     private void validateTarget(List<ServerPlayer> ps, long now) {
-        if (!valid(target)) {
+        if (!valid(target) || target.distanceToSqr(mob) > Math.pow(WGBosses.config.targetRange * 1.25, 2)) {
             if (cur == null) retarget(ps, now);
             else target = ps.get(0);
             return;
@@ -401,7 +439,7 @@ public final class Boss {
             default -> { }
         }
         target = pick;
-        targetUntil = now + Util.rint(200, 400);
+        targetUntil = now + newTargetTicks();
         if (m == Mode.FARTHEST && n > 1 && cur == null) dashLeft = Util.rint(40, 100);
     }
 
@@ -435,6 +473,15 @@ public final class Boss {
             Util.push(target, mob.getX(), mob.getZ(), 0.6, 0.3);
             attackCd = dashLeft > 0 ? 12 : 20;
         }
+        // anti-air: a flying target can't be ignored, the boss spits bolts at it
+        if (rangedCd > 0) rangedCd--;
+        if (airTicks >= 20 && rangedCd <= 0 && d > reach && target.distanceToSqr(mob) <= 40 * 40) {
+            rangedCd = 50;
+            Vec3 from = new Vec3(mob.getX(), mob.getY() + mob.getBbHeight() * 0.6, mob.getZ());
+            line(from, target.position().add(0, target.getBbHeight() * 0.5, 0), ParticleTypes.SOUL_FIRE_FLAME);
+            hurt(target, curDamage() * 0.5);
+            Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.ANVIL_LAND, 1.5f, 1.8f);
+        }
     }
 
     // ------------------------------------------------------------------ skills
@@ -442,8 +489,8 @@ public final class Boss {
         if (cd.getOrDefault(s, 0L) > now || target == null) return false;
         double d = Math.sqrt(target.distanceToSqr(mob));
         return switch (s) {
-            case LEAP -> d >= 6 && d <= 26;
-            case HOOK -> d >= 8 && d <= 40;
+            case LEAP -> (d >= 6 && d <= 26) || (airborne(target) && d <= 22);
+            case HOOK -> d >= (airborne(target) ? 4 : 8) && d <= 40;
             case BARRAGE -> d <= 34;
             case SMASH -> d <= 14;
             case ROAR -> d <= 24;
@@ -458,6 +505,14 @@ public final class Boss {
         if (now < nextSkillTick) return;
         List<Skill> avail = new ArrayList<>();
         for (Skill s : phaseSkills.get(phase - 1)) if (canUse(s, now, ps)) avail.add(s);
+        if (target != null && airborne(target)) {
+            List<Skill> air = new ArrayList<>();
+            for (Skill s : avail) {
+                if (s == Skill.HOOK || s == Skill.BARRAGE || s == Skill.LIGHTNING || s == Skill.ROAR
+                        || s == Skill.FLY_POTION || s == Skill.LEAP || s == Skill.SUMMON) air.add(s);
+            }
+            if (!air.isEmpty()) avail = air;
+        }
         if (avail.isEmpty()) { nextSkillTick = now + 40; return; }
         Skill s = Util.pick(avail);
         cur = s;
@@ -479,7 +534,9 @@ public final class Boss {
 
     private void endSkill(long now) {
         endSkillNow();
-        nextSkillTick = now + Util.rint(70, 140 - Math.min(50, (phase - 1) * 12));
+        int wait = Util.rint(70, 140 - Math.min(50, (phase - 1) * 12));
+        if (target != null && airborne(target)) wait /= 2;
+        nextSkillTick = now + wait;
     }
 
     private List<ServerPlayer> within(List<ServerPlayer> ps, double r) {
@@ -518,8 +575,13 @@ public final class Boss {
                 else if (skillT == 15) {
                     double dx = t.getX() - x, dz = t.getZ() - z, d = Math.max(0.1, Math.sqrt(dx * dx + dz * dz));
                     double h = Math.min(1.5, 0.4 + d * 0.07);
-                    mob.setDeltaMovement(dx / d * h, 0.75, dz / d * h);
+                    double vy = Math.max(0.75, Math.min(1.6, 0.75 + (t.getY() - y) * 0.07));
+                    leapHit = false;
+                    mob.setDeltaMovement(dx / d * h, vy, dz / d * h);
                     Util.sound(level, x, y, z, SoundEvents.IRON_GOLEM_ATTACK, 2f, 0.5f);
+                } else if (!leapHit && skillT > 15 && !within(ps, 3 + size * 0.5).isEmpty()) {
+                    for (ServerPlayer p : within(ps, 3 + size * 0.5)) { hurt(p, dmg * 0.7); Util.push(p, x, z, 0.4, -0.8); }
+                    leapHit = true;
                 } else if ((skillT > 22 && mob.onGround()) || skillT > 80) {
                     double r = 3 + size * 0.4;
                     for (ServerPlayer p : within(ps, r)) { hurt(p, dmg * 0.7); Util.push(p, x, z, 0.9, 0.45); }
@@ -612,7 +674,7 @@ public final class Boss {
                     puff(ParticleTypes.PORTAL, 30);
                     Util.sound(level, dest.x, dest.y, dest.z, SoundEvents.ENDERMAN_TELEPORT, 2f, 0.7f);
                     target = t;
-                    targetUntil = now + Util.rint(200, 400);
+                    targetUntil = now + newTargetTicks();
                     endSkill(now);
                 }
             }
