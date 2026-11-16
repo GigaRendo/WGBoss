@@ -50,6 +50,15 @@ public final class Cmd {
                     else c.getSource().sendFailure(Component.literal("No boss is active."));
                     return ok ? 1 : 0;
                 }))
+                .then(Commands.literal("toggle").requires(Cmd::admin).executes(c -> {
+                    Config cfg = WGBosses.config;
+                    cfg.autoSpawn = !cfg.autoSpawn;
+                    cfg.save();
+                    if (cfg.autoSpawn) WGBosses.MANAGER.scheduleNext();
+                    String s = cfg.autoSpawn ? "Automatic boss spawns are now ON (new timer started)." : "Automatic boss spawns are now OFF.";
+                    c.getSource().sendSuccess(() -> Component.literal(s), true);
+                    return 1;
+                }))
                 .then(Commands.literal("bloodmoon").requires(Cmd::admin).executes(Cmd::bloodMoon))
                 .then(Commands.literal("reload").requires(Cmd::admin).executes(c -> {
                     WGBosses.reloadAll();
@@ -72,7 +81,7 @@ public final class Cmd {
                     Boss b = WGBosses.MANAGER.first();
                     if (b == null) {
                         long t = WGBosses.MANAGER.ticksUntilNext();
-                        String s = t < 0 ? "A boss is not scheduled right now." : "No boss active. Next one in about " + (t / 1200 + 1) + " min.";
+                        String s = !WGBosses.config.autoSpawn ? "Automatic spawns are OFF (/wgboss toggle)." : t < 0 ? "A boss is not scheduled right now." : "No boss active. Next one in about " + (t / 1200 + 1) + " min.";
                         c.getSource().sendSuccess(() -> Component.literal(s), false);
                     } else {
                         String s = "[" + b.tierName() + "] " + b.baseName + " - Phase " + b.phase + "/" + b.phases
