@@ -23,6 +23,8 @@ public final class Config {
         public int skillMin, skillMax;
         public int shardMin, shardMax;
         public int xpMin, xpMax;
+        /** Damage per hit as % of the TARGET's max health (so it stays threatening with huge health/protection). */
+        public double hitPercent;
     }
 
     public static final class RewardEntry {
@@ -36,6 +38,8 @@ public final class Config {
     }
 
     // ---- spawning ----
+    /** false = no automatic boss spawns or warnings (admin /wgboss spawn still works). */
+    public boolean autoSpawn = true;
     public int minPlayers = 3;
     public int spawnMinMinutes = 45;
     public int spawnMaxMinutes = 90;
@@ -54,6 +58,15 @@ public final class Config {
     public double healthPerExtraPlayerPercent = 15;
     public double healthScaleCapPercent = 300;
     public int maxMinions = 4;
+    /** Bosses only target/chase players within this many blocks. */
+    public int targetRange = 64;
+    /** How long a boss stays on one target before re-picking (seconds). */
+    public int targetMinSeconds = 6;
+    public int targetMaxSeconds = 12;
+    /** true = boss damage ignores armor/protection enchants (magic damage). */
+    public boolean armorBypass = true;
+    /** true = a single boss hit can never kill a player (leaves half a heart), unless they are already at 1 HP. */
+    public boolean neverOneShot = true;
 
     // ---- blood moon ----
     public double bloodMoonChance = 0.08;
@@ -90,6 +103,8 @@ public final class Config {
         tiers.add(t("Legendary", 6, 6, 9, 3, 3, 1400, 13, 1.10, 2, 3, 22, 30, 2000, 3000));
         tiers.add(t("Mythic", 2, 8, 10, 3, 3, 2000, 16, 1.20, 3, 3, 30, 40, 3500, 5000));
         tiers.add(t("Calamity", 0, 10, 12, 5, 5, 3000, 20, 1.25, 3, 4, 50, 70, 6000, 9000));
+        double[] pct = {5, 6, 8, 10, 13, 16, 20};
+        for (int i = 0; i < tiers.size() && i < pct.length; i++) tiers.get(i).hitPercent = pct[i];
         buildDefaultRewards();
     }
 
@@ -151,6 +166,10 @@ public final class Config {
         }
         if (c == null) c = new Config();
         if (c.tiers == null || c.tiers.size() < 2) c.tiers = new Config().tiers;
+        Config d = new Config();
+        for (int i = 0; i < c.tiers.size() && i < d.tiers.size(); i++) {
+            if (c.tiers.get(i).hitPercent <= 0) c.tiers.get(i).hitPercent = d.tiers.get(i).hitPercent;
+        }
         c.save();
         return c;
     }
