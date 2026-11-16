@@ -47,6 +47,12 @@ public final class BossManager {
 
     private final Set<String> persisted = new HashSet<>();
 
+    private record Task(long at, Runnable run) {}
+    private final List<Task> tasks = new ArrayList<>();
+
+    /** Run something N ticks from now (used to space out the boss-death messages). */
+    public void later(int ticks, Runnable r) { tasks.add(new Task(tick + ticks, r)); }
+
     public static EntityType<?> byId(String id) {
         var i = net.minecraft.resources.Identifier.tryParse(id);
         if (i == null) return null;
@@ -98,7 +104,7 @@ public final class BossManager {
         tick = 0;
         nextSpawn = -1;
         pool = null;
-        bosses.clear(); byMob.clear(); minionOwner.clear();
+        bosses.clear(); byMob.clear(); minionOwner.clear(); tasks.clear();
     }
 
     public void shutdown() {
@@ -136,6 +142,15 @@ public final class BossManager {
             e.discard();
         }
         toDiscard.clear();
+
+        if (!tasks.isEmpty()) {
+            for (Task t : new ArrayList<>(tasks)) {
+                if (tick >= t.at()) {
+                    tasks.remove(t);
+                    try { t.run().run(); } catch (Throwable ex) { WGBosses.LOG.error("Delayed task failed", ex); }
+                }
+            }
+        }
 
         if (nextSpawn < 0) scheduleNext();
 
@@ -456,24 +471,35 @@ public final class BossManager {
 
         lvl.sendParticles(ParticleTypes.EXPLOSION_EMITTER, pos.x, pos.y + b.mob.getBbHeight() * 0.5, pos.z, 3, 1, 1, 1, 0);
         lvl.sendParticles(ParticleTypes.TOTEM_OF_UNDYING, pos.x, pos.y + b.mob.getBbHeight() * 0.5, pos.z, 80, 1.5, 1.5, 1.5, 0.3);
-        Util.sound(lvl, pos.x, pos.y, pos.z, SoundEvents.ENDER_DRAGON_DEATH, 3f, 1f);
-        say(b, "death", killer, true);
+        Util.sound(lvl, pos.x, pos.y, pos.z, SoundEvents.TOTEM_USE, 2f, 0.8f);
+        Util.soundAll(server, SoundEvents.UI_TOAST_CHALLENGE_COMPLETE, 0.7f, 1f);
 
         // rewards: split between everyone who fought, top damage dealer gets a bonus
         Rewards.Result rr = Rewards.roll(b);
-        distribute(b, sorted, topId, rr);
+        Map<UUID, Component> rewardMsgs = distribute(b, sorted, topId, rr);
 
-        // chat
-        Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" has been defeated!").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD)));
+        // chat, spaced out: defeated -> last words -> top damage -> rankings -> rewards
+        List<Component> rankLines = new ArrayList<>();
         int rank = 1;
         for (Map.Entry<UUID, Double> e : sorted) {
             if (rank > 3) break;
-            Util.broadcast(server, Component.literal("  #" + rank + " " + nameOf(e.getKey()) + " - " + Math.round(e.getValue()) + " damage").withStyle(ChatFormatting.YELLOW));
+            rankLines.add(Component.literal("  #" + rank + " " + nameOf(e.getKey()) + " - " + Math.round(e.getValue()) + " damage").withStyle(ChatFormatting.YELLOW));
             rank++;
         }
-        if (topId != null) {
-            Util.broadcast(server, prefix().append(Component.literal(nameOf(topId) + " dealt the most damage and earns bonus rewards!").withStyle(ChatFormatting.LIGHT_PURPLE)));
+        final String topName = topId == null ? null : nameOf(topId);
+
+        Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" has been defeated!").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD)));
+        later(30, () -> say(b, "death", killer, true));
+        if (topName != null) {
+            later(60, () -> Util.broadcast(server, prefix().append(Component.literal(topName + " dealt the most damage and earns bonus rewards!").withStyle(ChatFormatting.LIGHT_PURPLE))));
         }
+        later(80, () -> { for (Component l : rankLines) Util.broadcast(server, l); });
+        later(140, () -> {
+            for (Map.Entry<UUID, Component> e : rewardMsgs.entrySet()) {
+                ServerPlayer p = server.getPlayerList().getPlayer(e.getKey());
+                if (p != null) p.sendSystemMessage(e.getValue());
+            }
+        });
 
         // stats
         Config c = cfg();
@@ -493,7 +519,11 @@ public final class BossManager {
         removeBoss(b);
     }
 
+    private final Map<UUID, Map<net.minecraft.world.item.Item, Integer>> got = new HashMap<>();
+    private final Map<UUID, Integer> gotXp = new HashMap<>();
+
     private void give(ServerPlayer p, net.minecraft.world.item.Item item, int count) {
+        got.computeIfAbsent(p.getUUID(), k -> new LinkedHashMap<>()).merge(item, count, Integer::sum);
         int max = Math.max(1, new ItemStack(item, 1).getMaxStackSize());
         while (count > 0) {
             int n = Math.min(max, count);
@@ -503,7 +533,9 @@ public final class BossManager {
         }
     }
 
-    private void distribute(Boss b, List<Map.Entry<UUID, Double>> sorted, UUID topId, Rewards.Result rr) {
+    private Map<UUID, Component> distribute(Boss b, List<Map.Entry<UUID, Double>> sorted, UUID topId, Rewards.Result rr) {
+        got.clear();
+        gotXp.clear();
         double minDmg = b.maxHp * cfg().participationPercentForStats / 100.0;
         List<ServerPlayer> part = new ArrayList<>();
         List<Double> dmg = new ArrayList<>();
@@ -513,7 +545,8 @@ public final class BossManager {
             if (p == null || !p.isAlive() || e.getValue() < minDmg) continue;
             part.add(p); dmg.add(e.getValue()); total += e.getValue();
         }
-        if (part.isEmpty() || total <= 0) return;
+        Map<UUID, Component> out = new LinkedHashMap<>();
+        if (part.isEmpty() || total <= 0) return out;
         ServerPlayer top = part.get(0); // sorted by damage, so the first online participant is the best one
 
         Map<net.minecraft.world.item.Item, Integer> pool = new LinkedHashMap<>();
@@ -526,12 +559,39 @@ public final class BossManager {
             for (int i = 0; i < part.size(); i++) if (share[i] > 0) give(part.get(i), e.getKey(), share[i]);
         }
         for (ItemStack st : rr.bonus()) give(top, st.getItem(), st.getCount());
-        if (rr.xp() > 0) {
-            for (int i = 0; i < part.size(); i++) {
-                int x = (int) (rr.xp() * dmg.get(i) / total);
-                if (x > 0) ExperienceOrb.award((ServerLevel) part.get(i).level(), part.get(i).position(), x);
+        for (ServerPlayer p : part) {
+            for (ItemStack st : Rewards.rollPerPlayer(b)) give(p, st.getItem(), st.getCount());
+        }
+        for (int i = 0; i < part.size(); i++) {
+            int x = rr.xp() > 0 ? (int) (rr.xp() * dmg.get(i) / total) : 0;
+            if (x > 0) {
+                gotXp.put(part.get(i).getUUID(), x);
+                ExperienceOrb.award((ServerLevel) part.get(i).level(), part.get(i).position(), x);
             }
         }
+        for (ServerPlayer p : part) {
+            MutableComponent msg = prefix().append(Component.literal("Your rewards: ").withStyle(ChatFormatting.GREEN));
+            Map<net.minecraft.world.item.Item, Integer> m = got.get(p.getUUID());
+            boolean first = true;
+            if (m != null) {
+                for (Map.Entry<net.minecraft.world.item.Item, Integer> e : m.entrySet()) {
+                    if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                    first = false;
+                    msg.append(Component.literal(e.getValue() + "x ").withStyle(ChatFormatting.YELLOW));
+                    msg.append(new ItemStack(e.getKey()).getHoverName());
+                }
+            }
+            Integer xp = gotXp.get(p.getUUID());
+            if (xp != null) {
+                if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                first = false;
+                msg.append(Component.literal(xp + " XP").withStyle(ChatFormatting.GREEN));
+            }
+            if (first) msg.append(Component.literal("nothing this time").withStyle(ChatFormatting.GRAY));
+            if (p == top) msg.append(Component.literal("  (includes top damage bonus!)").withStyle(ChatFormatting.LIGHT_PURPLE));
+            out.put(p.getUUID(), msg);
+        }
+        return out;
     }
 
     private String nameOf(UUID id) {
