@@ -85,6 +85,8 @@ public final class Config {
     public double participationPercentForStats = 2.0;
     public int chestLifetimeSeconds = 300;
     public Map<String, List<RewardEntry>> rewards = new LinkedHashMap<>();
+    /** Rolled separately for EACH participant (small-chance extras like totems). */
+    public Map<String, List<RewardEntry>> perPlayerRewards = new LinkedHashMap<>();
     public Map<String, List<RewardEntry>> topDamageBonusRewards = new LinkedHashMap<>();
 
     public List<TierDef> tiers = new ArrayList<>();
@@ -129,8 +131,10 @@ public final class Config {
             l.add(new RewardEntry("minecraft:enchanted_golden_apple", 1, 1 + i / 3, Math.min(1.0, 0.25 + 0.1 * i)));
             if (i >= 2) l.add(new RewardEntry("minecraft:netherite_scrap", 1, 1 + i / 2, Math.min(1.0, 0.4 + 0.08 * i)));
             if (i >= 4) l.add(new RewardEntry("minecraft:netherite_ingot", 1, 1 + (i - 4), Math.min(1.0, 0.3 + 0.1 * (i - 4))));
-            if (i >= 5) l.add(new RewardEntry("minecraft:totem_of_undying", 1, 1, 0.5));
             rewards.put(key, l);
+            List<RewardEntry> pp = new ArrayList<>();
+            pp.add(new RewardEntry("minecraft:totem_of_undying", 1, 1, Math.min(1.0, 0.03 + 0.02 * i)));
+            perPlayerRewards.put(key, pp);
 
             List<RewardEntry> b = new ArrayList<>();
             b.add(new RewardEntry("minecraft:diamond", 2 + i, 4 + 2 * i, 1.0));
