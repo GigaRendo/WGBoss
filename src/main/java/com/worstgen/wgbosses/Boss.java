@@ -108,6 +108,8 @@ public final class Boss {
     private final Set<UUID> hitSet = new HashSet<>();
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
+    private long poolStart;
+    private double poolDealt;
 
     Boss(BossManager mgr, int id, ServerLevel level, Mob mob, BossManager.Spec s, String name, int playersOnline) {
         Config c = WGBosses.config;
@@ -567,6 +569,15 @@ public final class Boss {
                 if (mgr.tick - w[0] >= 20) { w[0] = mgr.tick; w[1] = 0; }
                 amt = Math.min(amt, Math.max(0, maxHp * pt.dpsCapPercent / 100.0 - w[1]));
                 w[1] += amt;
+            }
+        }
+        if (cfg.damageCapEnabled) {
+            Config.TierDef pt2 = phaseTier(phase);
+            if (pt2.minFightSeconds > 0) {
+                double perSec = maxHp / pt2.minFightSeconds;
+                if (mgr.tick - poolStart >= 20) { poolStart = mgr.tick; poolDealt = 0; }
+                amt = Math.min(amt, Math.max(0, perSec - poolDealt));
+                poolDealt += amt;
             }
         }
         double floor = lower(phase);
