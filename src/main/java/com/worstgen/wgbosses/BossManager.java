@@ -159,7 +159,7 @@ public final class BossManager {
             try { b.tick(tick); }
             catch (Throwable t) { WGBosses.LOG.error("Boss tick failed, removing boss", t); b.gone = true; }
             if (b.gone && !b.dying) {
-                Util.broadcast(server, prefix().append(Component.literal("The boss vanished.").withStyle(ChatFormatting.GRAY)));
+                Util.broadcast(server, T("vanish.chat"));
                 b.discardAll();
                 removeBoss(b);
             }
@@ -179,21 +179,14 @@ public final class BossManager {
         }
     }
 
-    private MutableComponent prefix() {
-        return Component.literal("[WGBoss] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD);
-    }
+    private Component T(String key, Object... kv) { return WGBosses.bank.msg(key, kv); }
 
     private void warn(int minutes) {
-        boolean blood = nextBlood;
-        Component title = Component.literal(blood ? "THE BLOOD MOON APPROACHES" : "!! BOSS INCOMING !!")
-                .withStyle(blood ? ChatFormatting.DARK_RED : ChatFormatting.GOLD, ChatFormatting.BOLD);
-        String when = minutes == 1 ? "1 minute" : minutes + " minutes";
-        Component sub = Component.literal((blood ? "Something terrible spawns in " : "A boss spawns in ") + when + " - gear up!")
-                .withStyle(blood ? ChatFormatting.RED : ChatFormatting.YELLOW);
-        Util.titleAll(server, title, sub, 10, 80, 20);
+        String k = nextBlood ? "blood" : "normal";
+        String time = minutes == 1 ? WGBosses.bank.raw("time.one") : WGBosses.bank.raw("time.many").replace("{n}", String.valueOf(minutes));
+        Util.titleAll(server, T("warn.title." + k), T("warn.sub." + k, "time", time), 10, 80, 20);
         Util.soundAll(server, SoundEvents.WITHER_SPAWN, 0.5f, 1.5f);
-        Util.broadcast(server, prefix().append(Component.literal(
-                (blood ? "The blood moon rises in " : "A boss will appear in ") + when + "!").withStyle(blood ? ChatFormatting.RED : ChatFormatting.YELLOW)));
+        Util.broadcast(server, T("warn.chat." + k, "time", time));
     }
 
     // ------------------------------------------------------------------ mob pool
@@ -224,28 +217,12 @@ public final class BossManager {
         }
     }
 
-    private void ensurePool(ServerLevel lvl) {
+    public EntityType<?> randomMob(ServerLevel lvl) {
         if (pool == null || pool.isEmpty()) {
             pool = new ArrayList<>();
             for (EntityType<?> t : BuiltInRegistries.ENTITY_TYPE) if (eligible(t, lvl)) pool.add(t);
             WGBosses.LOG.info("WGBosses mob pool: {} mob types", pool.size());
-            WGBosses.LOG.info("WGBosses flying mobs in pool: {}", flyerIds(lvl));
         }
-    }
-
-    /** Pool mobs that will hover/fly as bosses (by id keyword/config). */
-    public List<String> flyerIds(ServerLevel lvl) {
-        ensurePool(lvl);
-        List<String> l = new ArrayList<>();
-        for (EntityType<?> t : pool) {
-            String id = BuiltInRegistries.ENTITY_TYPE.getKey(t).toString();
-            if (Boss.isFlyerId(id)) l.add(id);
-        }
-        return l;
-    }
-
-    public EntityType<?> randomMob(ServerLevel lvl) {
-        ensurePool(lvl);
         return pool.isEmpty() ? byId("minecraft:zombie") : Util.pick(pool);
     }
 
@@ -292,7 +269,8 @@ public final class BossManager {
         s.blood = blood;
         s.rainbow = !s.calamity && Util.chance(c.rainbowChance);
         if (s.rainbow) s.abnormal = Util.pick(List.of("SPEED", "HEALTH", "DAMAGE", "SIZE"));
-        s.personality = Util.pick(PERSONALITIES);
+        List<String> ps = new ArrayList<>(WGBosses.bank.taunts.keySet());
+        s.personality = ps.isEmpty() ? "ego" : Util.pick(ps);
         return s;
     }
 
@@ -390,56 +368,36 @@ public final class BossManager {
     }
 
     // ------------------------------------------------------------------ announcements
-    private Component tpLink(Boss b, String label) {
-        return Component.literal(label).withStyle(Style.EMPTY.withColor(ChatFormatting.GREEN).withBold(true)
+    private Component tpLink(Boss b, Component label) {
+        return label.copy().withStyle(Style.EMPTY
                 .withClickEvent(new ClickEvent.RunCommand("/wgboss tp " + b.id))
-                .withHoverEvent(new HoverEvent.ShowText(Component.literal("Teleport 10-20 blocks from the boss (one use)"))));
+                .withHoverEvent(new HoverEvent.ShowText(T("tp.hover"))));
     }
 
     private void announce(List<Boss> bs, boolean blood) {
         Util.soundAll(server, SoundEvents.WITHER_SPAWN, 0.9f, 1.0f);
         if (blood) {
-            Util.titleAll(server, Component.literal("THE BLOOD MOON RISES").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD),
-                    Component.literal("Two bosses have appeared!!").withStyle(ChatFormatting.RED), 10, 100, 30);
-            Util.broadcast(server, prefix().append(Component.literal("THE BLOOD MOON RISES!! Two bosses at once!").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD)));
+            Util.titleAll(server, T("spawn.blood.title"), T("spawn.blood.sub"), 10, 100, 30);
+            Util.broadcast(server, T("spawn.blood.chat"));
         } else {
             Boss b = bs.get(0);
-            Util.titleAll(server, Component.literal("A BOSS HAS SPAWNED").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD),
-                    Component.literal("[" + b.tierName() + "] ").withStyle(b.chatColor()).append(Component.literal(b.baseName).withStyle(ChatFormatting.WHITE)),
-                    10, 80, 20);
+            Util.titleAll(server, T("spawn.title"), T("spawn.sub", b.vars()), 10, 80, 20);
         }
         int n = 1;
         for (Boss b : bs) {
             String dim = b.level.dimension().identifier().getPath();
             long ax = Math.round(b.mob.getX() / 10.0) * 10, ay = Math.round(b.mob.getY() / 10.0) * 10, az = Math.round(b.mob.getZ() / 10.0) * 10;
-            MutableComponent m = prefix();
-            m.append(Component.literal("[" + b.tierName() + "] ").withStyle(b.chatColor()));
-            m.append(b.displayName());
-            m.append(Component.literal(" spawned in the " + dim + " near " + ax + ", " + ay + ", " + az + "!  ").withStyle(ChatFormatting.YELLOW));
-            if (b.rainbow) m.append(Component.literal("(RAINBOW: abnormal " + b.abnormal.toLowerCase(Locale.ROOT) + ")  ").withStyle(ChatFormatting.LIGHT_PURPLE));
-            m.append(tpLink(b, bs.size() > 1 ? "[Click to Teleport #" + n + "]" : "[Click to Teleport]"));
-            Util.broadcast(server, m);
+            Component tp = tpLink(b, bs.size() > 1 ? T("tp.label.multi", "n", n) : T("tp.label"));
+            Component rb = b.rainbow ? T("spawn.rainbow", "stat", b.abnormal.toLowerCase(Locale.ROOT)) : Component.empty();
+            Util.broadcast(server, T("spawn.chat", b.vars("dim", dim, "x", ax, "y", ay, "z", az, "rainbow", rb, "tp", tp)));
             n++;
         }
     }
 
     public void phaseAnnounce(Boss b) {
-        int p = b.phase;
-        Component title; Component sub;
-        if (b.calamity && p == b.phases) {
-            title = Component.literal("THE TRUE FORM REVEALED").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD);
-            sub = Component.literal("CALAMITY").withStyle(ChatFormatting.RED, ChatFormatting.BOLD);
-            Util.broadcast(server, prefix().append(Component.literal("!!! THE TRUE FORM REVEALED: CALAMITY !!!").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD)));
-        } else if (b.calamity) {
-            title = Component.literal("IT TRANSFORMS").withStyle(ChatFormatting.RED, ChatFormatting.BOLD);
-            sub = b.displayName().copy().append(Component.literal(" is now " + b.tierName() + "!").withStyle(ChatFormatting.WHITE));
-            Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" transformed into a " + b.tierName() + "!!").withStyle(ChatFormatting.RED)));
-        } else {
-            title = Component.literal("PHASE " + p).withStyle(b.chatColor(), ChatFormatting.BOLD);
-            sub = Component.literal(b.baseName + " grows stronger!").withStyle(ChatFormatting.WHITE);
-            Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" entered PHASE " + p + "/" + b.phases + "!!").withStyle(ChatFormatting.RED)));
-        }
-        Util.titleAll(server, title, sub, 5, 50, 15);
+        String k = (b.calamity && b.phase == b.phases) ? "calamity.reveal" : b.calamity ? "calamity.transform" : "phase";
+        Util.titleAll(server, T(k + ".title", b.vars()), T(k + ".sub", b.vars()), 5, 50, 15);
+        Util.broadcast(server, T(k + ".chat", b.vars()));
         Util.soundAll(server, SoundEvents.ENDER_DRAGON_GROWL, 0.8f, 0.9f);
         say(b, "phase", null, true);
     }
@@ -457,11 +415,7 @@ public final class BossManager {
             who = all.isEmpty() ? "nobody" : all.get(Util.rint(0, all.size() - 1)).getName().getString();
         }
         line = line.replace("{player}", who).replace("{boss}", b.baseName);
-        MutableComponent c = Component.literal("<").withStyle(ChatFormatting.GRAY);
-        c.append(b.displayName());
-        c.append(Component.literal("> ").withStyle(ChatFormatting.GRAY));
-        c.append(Component.literal(line).withStyle(ChatFormatting.WHITE));
-        Util.broadcast(server, c);
+        Util.broadcast(server, T("chat.line", b.vars("text", line)));
     }
 
     // ------------------------------------------------------------------ despawn / death
@@ -469,7 +423,7 @@ public final class BossManager {
         if (b.dying) return;
         b.dying = true;
         say(b, "despawn", null, true);
-        Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" got bored and left.").withStyle(ChatFormatting.GRAY)));
+        Util.broadcast(server, T("despawn.chat", b.vars()));
         b.discardAll();
         removeBoss(b);
     }
@@ -499,16 +453,14 @@ public final class BossManager {
         int rank = 1;
         for (Map.Entry<UUID, Double> e : sorted) {
             if (rank > 3) break;
-            rankLines.add(Component.literal("  #" + rank + " " + nameOf(e.getKey()) + " - " + Math.round(e.getValue()) + " damage").withStyle(ChatFormatting.YELLOW));
+            rankLines.add(T("death.rank", "rank", rank, "player", nameOf(e.getKey()), "damage", Math.round(e.getValue())));
             rank++;
         }
         final String topName = topId == null ? null : nameOf(topId);
 
-        Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" has been defeated!").withStyle(ChatFormatting.GREEN, ChatFormatting.BOLD)));
+        Util.broadcast(server, T("death.defeated", b.vars()));
         later(30, () -> say(b, "death", killer, true));
-        if (topName != null) {
-            later(60, () -> Util.broadcast(server, prefix().append(Component.literal(topName + " dealt the most damage and earns bonus rewards!").withStyle(ChatFormatting.LIGHT_PURPLE))));
-        }
+        if (topName != null) later(60, () -> Util.broadcast(server, T("death.top", "player", topName)));
         later(80, () -> { for (Component l : rankLines) Util.broadcast(server, l); });
         later(140, () -> {
             for (Map.Entry<UUID, Component> e : rewardMsgs.entrySet()) {
@@ -586,25 +538,25 @@ public final class BossManager {
             }
         }
         for (ServerPlayer p : part) {
-            MutableComponent msg = prefix().append(Component.literal("Your rewards: ").withStyle(ChatFormatting.GREEN));
+            MutableComponent items = Component.empty();
             Map<net.minecraft.world.item.Item, Integer> m = got.get(p.getUUID());
             boolean first = true;
             if (m != null) {
                 for (Map.Entry<net.minecraft.world.item.Item, Integer> e : m.entrySet()) {
-                    if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                    if (!first) items.append(T("rewards.item.sep"));
                     first = false;
-                    msg.append(Component.literal(e.getValue() + "x ").withStyle(ChatFormatting.YELLOW));
-                    msg.append(new ItemStack(e.getKey()).getHoverName());
+                    items.append(T("rewards.item", "n", e.getValue(), "item", new ItemStack(e.getKey()).getHoverName()));
                 }
             }
             Integer xp = gotXp.get(p.getUUID());
             if (xp != null) {
-                if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                if (!first) items.append(T("rewards.item.sep"));
                 first = false;
-                msg.append(Component.literal(xp + " XP").withStyle(ChatFormatting.GREEN));
+                items.append(T("rewards.xp", "n", xp));
             }
-            if (first) msg.append(Component.literal("nothing this time").withStyle(ChatFormatting.GRAY));
-            if (p == top) msg.append(Component.literal("  (includes top damage bonus!)").withStyle(ChatFormatting.LIGHT_PURPLE));
+            if (first) items.append(T("rewards.none"));
+            MutableComponent msg = Component.empty().append(T("rewards.msg", "items", items));
+            if (p == top) msg.append(T("rewards.top"));
             out.put(p.getUUID(), msg);
         }
         return out;
@@ -619,8 +571,8 @@ public final class BossManager {
     public String teleport(ServerPlayer p, int id) {
         Boss b = null;
         for (Boss x : bosses) if (x.id == id && !x.dying) b = x;
-        if (b == null) return "That boss is already gone.";
-        if (!b.tpUsed.add(p.getUUID())) return "You already used the teleport for this boss.";
+        if (b == null) return "tp.gone";
+        if (!b.tpUsed.add(p.getUUID())) return "tp.used";
         Config c = cfg();
         Vec3 d = Util.findSafe(b.level, b.mob.getX(), b.mob.getY(), b.mob.getZ(), c.teleportMinDistance, c.teleportMaxDistance);
         if (d == null) d = b.mob.position().add(c.teleportMinDistance, 0, 0);
