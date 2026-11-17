@@ -178,9 +178,19 @@ public final class Boss {
 
     public ChatFormatting chatColor() {
         List<String> l = WGBosses.config.tierChatColors;
-        ChatFormatting f = l.isEmpty() ? null : ChatFormatting.byName(l.get(Math.min(l.size() - 1, displayTierIdx())));
-        return f == null ? ChatFormatting.WHITE : f;
+        if (l.isEmpty()) {
+           return ChatFormatting.WHITE;
     }
+    String name = l.get(Math.min(l.size() - 1, displayTierIdx()));
+       if (name == null) {
+           return ChatFormatting.WHITE;
+    }
+    try {
+        return ChatFormatting.valueOf(name.trim().toUpperCase(java.util.Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+        return ChatFormatting.WHITE;
+    }
+}
 
     private String colorCode() { return "&" + chatColor().toString().charAt(1); }
 
