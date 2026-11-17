@@ -178,7 +178,7 @@ public final class Boss {
 
     public ChatFormatting chatColor() {
         List<String> l = WGBosses.config.tierChatColors;
-        ChatFormatting f = l.isEmpty() ? null : ChatFormatting.getByName(l.get(Math.min(l.size() - 1, displayTierIdx())));
+        ChatFormatting f = l.isEmpty() ? null : ChatFormatting.byName(l.get(Math.min(l.size() - 1, displayTierIdx())));
         return f == null ? ChatFormatting.WHITE : f;
     }
 
