@@ -64,7 +64,8 @@ public final class Util {
 
     private static Style applyFmt(Style st, ChatFormatting f) {
         if (f == ChatFormatting.RESET) return Style.EMPTY;
-        if (f.isColor()) return Style.EMPTY.withColor(f);
+        if (f != null && f.isColor()) // If isColor exists in your version, or use:
+// if (f != null && f.getColor() != null)
         if (f == ChatFormatting.BOLD) return st.withBold(true);
         if (f == ChatFormatting.ITALIC) return st.withItalic(true);
         if (f == ChatFormatting.UNDERLINE) return st.withUnderlined(true);
