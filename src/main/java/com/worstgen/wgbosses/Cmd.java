@@ -65,6 +65,15 @@ public final class Cmd {
                     c.getSource().sendSuccess(() -> Component.literal("WGBosses config reloaded."), true);
                     return 1;
                 }))
+                .then(Commands.literal("flyers").requires(Cmd::admin).executes(c -> {
+                    ServerPlayer p = c.getSource().getPlayer();
+                    ServerLevel lvl = p != null ? (ServerLevel) p.level() : c.getSource().getServer().overworld();
+                    List<String> l = WGBosses.MANAGER.flyerIds(lvl);
+                    String s = l.isEmpty() ? "No flying mobs detected in the boss pool."
+                            : l.size() + " flying mobs: " + String.join(", ", l.subList(0, Math.min(40, l.size())));
+                    c.getSource().sendSuccess(() -> Component.literal(s), false);
+                    return 1;
+                }))
                 .then(Commands.literal("tp")
                         .then(Commands.argument("id", IntegerArgumentType.integer(1)).executes(c -> {
                             ServerPlayer p = c.getSource().getPlayer();
