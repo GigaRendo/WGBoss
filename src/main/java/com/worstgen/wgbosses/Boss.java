@@ -108,6 +108,7 @@ public final class Boss {
     private final Set<UUID> hitSet = new HashSet<>();
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
+    private int crowd;
     private long poolStart;
     private double poolDealt;
 
@@ -239,6 +240,12 @@ public final class Boss {
     }
 
     public boolean invulnerable() { return mgr.tick < invulnUntil || mgr.tick < shieldUntil; }
+
+    private double crowdMul() {
+        Config c = WGBosses.config;
+        double extra = Math.min(c.damageScaleCapPercent, Math.max(0, crowd - c.minPlayers) * c.damagePerExtraPlayerPercent);
+        return c.bossDamageMult * (1 + extra / 100.0);
+    }
 
     private double powerMul() { return mgr.tick < powerUntil ? WGBosses.config.powerUpDamageMult : 1.0; }
 
@@ -507,7 +514,7 @@ public final class Boss {
     private void hurt(ServerPlayer p, double amount) {
         if (!p.isAlive() || amount <= 0) return;
         double ratio = amount / Math.max(0.01, curDamage());
-        double pct = phaseTier(phase).hitPercent * (calamity ? 1 : 1 + 0.2 * (phase - 1)) * dmgMult * powerMul();
+        double pct = phaseTier(phase).hitPercent * (calamity ? 1 : 1 + 0.2 * (phase - 1)) * dmgMult * powerMul() * crowdMul();
         double finalDmg = Math.max(1.0, p.getMaxHealth() * pct / 100.0 * ratio);
         if (WGBosses.config.neverOneShot && p.getHealth() > 1.0f) finalDmg = Math.min(finalDmg, p.getHealth() - 1.0f);
         DamageSource src = WGBosses.config.armorBypass ? level.damageSources().indirectMagic(mob, mob) : level.damageSources().mobAttack(mob);
@@ -694,6 +701,7 @@ public final class Boss {
         if (transition > 0) { tickTransition(); return; }
 
         List<ServerPlayer> ps = inRange(players());
+        crowd = ps.size();
         tickMinions(ps);
         if (ps.isEmpty()) { target = null; if (cur != null) endSkill(now); return; }
         validateTarget(ps, now);
