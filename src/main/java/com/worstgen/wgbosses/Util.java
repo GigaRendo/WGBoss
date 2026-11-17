@@ -1,7 +1,10 @@
 package com.worstgen.wgbosses;
 
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
 import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
 import net.minecraft.network.protocol.game.ClientboundSetSubtitleTextPacket;
 import net.minecraft.network.protocol.game.ClientboundSetTitleTextPacket;
@@ -13,11 +16,62 @@ import net.minecraft.sounds.SoundEvent;
 import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 public final class Util {
     private Util() {}
+
+    /** Template -> Component. Supports &-color codes and {placeholders} (String or Component values). */
+    public static MutableComponent fmt(String tpl, Object... kv) {
+        Map<String, Object> v = new HashMap<>();
+        for (int i = 0; i + 1 < kv.length; i += 2) v.put(String.valueOf(kv[i]), kv[i + 1]);
+        MutableComponent out = Component.empty();
+        Style st = Style.EMPTY;
+        StringBuilder sb = new StringBuilder();
+        int i = 0, n = tpl.length();
+        while (i < n) {
+            char c = tpl.charAt(i);
+            if (c == '&' && i + 1 < n) {
+                ChatFormatting f = ChatFormatting.getByCode(tpl.charAt(i + 1));
+                if (f != null) { flush(out, sb, st); st = applyFmt(st, f); i += 2; continue; }
+            }
+            if (c == '{') {
+                int e = tpl.indexOf('}', i);
+                if (e > i) {
+                    String key = tpl.substring(i + 1, e);
+                    if (v.containsKey(key)) {
+                        Object o = v.get(key);
+                        if (o instanceof Component comp) { flush(out, sb, st); out.append(comp); }
+                        else sb.append(o);
+                        i = e + 1;
+                        continue;
+                    }
+                }
+            }
+            sb.append(c);
+            i++;
+        }
+        flush(out, sb, st);
+        return out;
+    }
+
+    private static void flush(MutableComponent out, StringBuilder sb, Style st) {
+        if (sb.length() > 0) { out.append(Component.literal(sb.toString()).withStyle(st)); sb.setLength(0); }
+    }
+
+    private static Style applyFmt(Style st, ChatFormatting f) {
+        if (f == ChatFormatting.RESET) return Style.EMPTY;
+        if (f.isColor()) return Style.EMPTY.withColor(f);
+        if (f == ChatFormatting.BOLD) return st.withBold(true);
+        if (f == ChatFormatting.ITALIC) return st.withItalic(true);
+        if (f == ChatFormatting.UNDERLINE) return st.withUnderlined(true);
+        if (f == ChatFormatting.STRIKETHROUGH) return st.withStrikethrough(true);
+        if (f == ChatFormatting.OBFUSCATED) return st.withObfuscated(true);
+        return st;
+    }
 
     public static int rint(int a, int b) { return b <= a ? a : ThreadLocalRandom.current().nextInt(a, b + 1); }
     public static double rdbl(double a, double b) { return b <= a ? a : ThreadLocalRandom.current().nextDouble(a, b); }
