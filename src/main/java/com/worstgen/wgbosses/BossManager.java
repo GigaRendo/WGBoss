@@ -224,12 +224,28 @@ public final class BossManager {
         }
     }
 
-    public EntityType<?> randomMob(ServerLevel lvl) {
+    private void ensurePool(ServerLevel lvl) {
         if (pool == null || pool.isEmpty()) {
             pool = new ArrayList<>();
             for (EntityType<?> t : BuiltInRegistries.ENTITY_TYPE) if (eligible(t, lvl)) pool.add(t);
             WGBosses.LOG.info("WGBosses mob pool: {} mob types", pool.size());
+            WGBosses.LOG.info("WGBosses flying mobs in pool: {}", flyerIds(lvl));
         }
+    }
+
+    /** Pool mobs that will hover/fly as bosses (by id keyword/config). */
+    public List<String> flyerIds(ServerLevel lvl) {
+        ensurePool(lvl);
+        List<String> l = new ArrayList<>();
+        for (EntityType<?> t : pool) {
+            String id = BuiltInRegistries.ENTITY_TYPE.getKey(t).toString();
+            if (Boss.isFlyerId(id)) l.add(id);
+        }
+        return l;
+    }
+
+    public EntityType<?> randomMob(ServerLevel lvl) {
+        ensurePool(lvl);
         return pool.isEmpty() ? byId("minecraft:zombie") : Util.pick(pool);
     }
 
