@@ -29,6 +29,8 @@ public final class Config {
         public double hitCapPercent;
         /** Silent damage cap: max damage ONE player can do per second, as % of the boss's max HP. */
         public double dpsCapPercent;
+        /** Whole-fight limit: ALL players combined can't deal more than maxHp / this per second (= fastest possible kill, in seconds). */
+        public double minFightSeconds;
     }
 
     public static final class RewardEntry {
@@ -173,9 +175,11 @@ public final class Config {
         for (int i = 0; i < tiers.size() && i < pct.length; i++) tiers.get(i).hitPercent = pct[i];
         double[] hitCap = {5, 4.5, 4, 3.5, 3, 2.5, 2};
         double[] dpsCap = {10, 9, 8, 7, 6, 5, 4};
+        double[] fightSec = {90, 120, 180, 240, 360, 480, 600};
         for (int i = 0; i < tiers.size() && i < hitCap.length; i++) {
             tiers.get(i).hitCapPercent = hitCap[i];
             tiers.get(i).dpsCapPercent = dpsCap[i];
+            tiers.get(i).minFightSeconds = fightSec[i];
         }
         buildDefaultRewards();
     }
@@ -245,6 +249,7 @@ public final class Config {
             if (c.tiers.get(i).hitPercent <= 0) c.tiers.get(i).hitPercent = d.tiers.get(i).hitPercent;
             if (c.tiers.get(i).hitCapPercent <= 0) c.tiers.get(i).hitCapPercent = d.tiers.get(i).hitCapPercent;
             if (c.tiers.get(i).dpsCapPercent <= 0) c.tiers.get(i).dpsCapPercent = d.tiers.get(i).dpsCapPercent;
+            if (c.tiers.get(i).minFightSeconds <= 0) c.tiers.get(i).minFightSeconds = d.tiers.get(i).minFightSeconds;
         }
         if (c.immuneEffects == null) c.immuneEffects = d.immuneEffects;
         if (c.flyingMobs == null) c.flyingMobs = new ArrayList<>();
