@@ -3,6 +3,8 @@ package com.worstgen.wgbosses;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
+import net.minecraft.network.chat.Component;
+
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
@@ -22,8 +24,95 @@ public final class MessageBank {
     public Map<String, List<String>> taglish = new LinkedHashMap<>();
     public List<String> playerTemplates = new ArrayList<>();
     public List<String> coolNames = new ArrayList<>();
+    /** Every system message. &-color codes and {placeholders} work. Edit freely, then /wgboss reload. */
+    public Map<String, String> text = new LinkedHashMap<>();
 
-    public MessageBank() { defaults(); }
+    public MessageBank() { defaults(); text.putAll(defaultText()); }
+
+    private static Map<String, String> defaultText() {
+        Map<String, String> t = new LinkedHashMap<>();
+        t.put("prefix", "&6&l[WGBoss] ");
+        t.put("name.format", "{c}&l{boss}");
+        t.put("tier.tag", "{c}[{tier}]");
+        t.put("bar.title", "{c}[{tier_upper}] &f{boss} - Phase {phase}/{phases}");
+        t.put("chat.line", "&7<{name}&7> &f{text}");
+        t.put("time.one", "1 minute");
+        t.put("time.many", "{n} minutes");
+        t.put("warn.title.normal", "&6&l!! BOSS INCOMING !!");
+        t.put("warn.title.blood", "&4&lTHE BLOOD MOON APPROACHES");
+        t.put("warn.sub.normal", "&eA boss spawns in {time} - gear up!");
+        t.put("warn.sub.blood", "&cSomething terrible spawns in {time} - gear up!");
+        t.put("warn.chat.normal", "{prefix}&eA boss will appear in {time}!");
+        t.put("warn.chat.blood", "{prefix}&cThe blood moon rises in {time}!");
+        t.put("spawn.title", "&6&lA BOSS HAS SPAWNED");
+        t.put("spawn.sub", "{tiertag} &f{boss}");
+        t.put("spawn.chat", "{prefix}{tiertag} {name}&e spawned in the {dim} near {x}, {y}, {z}!  {rainbow}{tp}");
+        t.put("spawn.rainbow", "&d(RAINBOW: abnormal {stat})  ");
+        t.put("spawn.blood.title", "&4&lTHE BLOOD MOON RISES");
+        t.put("spawn.blood.sub", "&cTwo bosses have appeared!!");
+        t.put("spawn.blood.chat", "{prefix}&4&lTHE BLOOD MOON RISES!! Two bosses at once!");
+        t.put("tp.label", "&a&l[Click to Teleport]");
+        t.put("tp.label.multi", "&a&l[Click to Teleport #{n}]");
+        t.put("tp.hover", "Teleport 10-20 blocks from the boss (one use)");
+        t.put("tp.gone", "That boss is already gone.");
+        t.put("tp.used", "You already used the teleport for this boss.");
+        t.put("phase.title", "{c}&lPHASE {phase}");
+        t.put("phase.sub", "&f{boss} grows stronger!");
+        t.put("phase.chat", "{prefix}{name}&c entered PHASE {phase}/{phases}!!");
+        t.put("calamity.transform.title", "&c&lIT TRANSFORMS");
+        t.put("calamity.transform.sub", "{name}&f is now {tier}!");
+        t.put("calamity.transform.chat", "{prefix}{name}&c transformed into a {tier}!!");
+        t.put("calamity.reveal.title", "&4&lTHE TRUE FORM REVEALED");
+        t.put("calamity.reveal.sub", "&c&lCALAMITY");
+        t.put("calamity.reveal.chat", "{prefix}&4&l!!! THE TRUE FORM REVEALED: CALAMITY !!!");
+        t.put("despawn.chat", "{prefix}{name}&7 got bored and left.");
+        t.put("vanish.chat", "{prefix}&7The boss vanished.");
+        t.put("death.defeated", "{prefix}{name}&a&l has been defeated!");
+        t.put("death.top", "{prefix}&d{player} dealt the most damage and earns bonus rewards!");
+        t.put("death.rank", "&e  #{rank} {player} - {damage} damage");
+        t.put("rewards.msg", "{prefix}&aYour rewards: {items}");
+        t.put("rewards.item", "&e{n}x &f{item}");
+        t.put("rewards.item.sep", "&7, ");
+        t.put("rewards.xp", "&a{n} XP");
+        t.put("rewards.none", "&7nothing this time");
+        t.put("rewards.top", "&d  (includes top damage bonus!)");
+        t.put("cmd.kill.ok", "Boss removed (no drops).");
+        t.put("cmd.kill.none", "No boss is active.");
+        t.put("cmd.reload", "WGBosses config reloaded.");
+        t.put("cmd.toggle.on", "Automatic boss spawns are now ON (new timer started).");
+        t.put("cmd.toggle.off", "Automatic boss spawns are now OFF.");
+        t.put("cmd.noplayer", "No player online to spawn near.");
+        t.put("cmd.badtier", "Unknown tier: {tier}");
+        t.put("cmd.spawnfail", "Could not spawn that boss (see server log).");
+        t.put("info.off", "Automatic spawns are OFF (/wgboss toggle).");
+        t.put("info.unscheduled", "A boss is not scheduled right now.");
+        t.put("info.next", "No boss active. Next one in about {min} min.");
+        t.put("info.boss", "[{tier}] {boss} - Phase {phase}/{phases} - {hp}% HP");
+        t.put("top.title.kills", "&6&l== Top boss kills ==");
+        t.put("top.title.damage", "&6&l== Top damage ==");
+        t.put("top.title.calamity", "&6&l== Calamity kills ==");
+        t.put("top.title.highest", "&6&l== Highest tier killed ==");
+        t.put("top.title.mvp", "&6&l== MVP (most damage) wins ==");
+        t.put("top.empty", "&7Nothing recorded yet.");
+        t.put("top.line", "&e#{rank} {player} - {value}");
+        return t;
+    }
+
+    /** Raw template (with defaults as fallback). */
+    public String raw(String key) {
+        String t = text.get(key);
+        if (t == null) t = defaultText().get(key);
+        return t == null ? key : t;
+    }
+
+    /** Build a Component from a message key. "c" is a raw color code like "&6" and works anywhere, even before other codes. */
+    public Component msg(String key, Object... kv) {
+        String tpl = raw(key).replace("{prefix}", raw("prefix"));
+        for (int i = 0; i + 1 < kv.length; i += 2) {
+            if ("c".equals(kv[i])) tpl = tpl.replace("{c}", String.valueOf(kv[i + 1]));
+        }
+        return Util.fmt(tpl, kv);
+    }
 
     private void add(String p, String e, String... lines) {
         taunts.computeIfAbsent(p, k -> new LinkedHashMap<>()).computeIfAbsent(e, k -> new ArrayList<>()).addAll(Arrays.asList(lines));
@@ -153,6 +242,8 @@ public final class MessageBank {
         if (m.taunts == null || m.taunts.isEmpty()) m.taunts = new MessageBank().taunts;
         if (m.playerTemplates == null || m.playerTemplates.isEmpty()) m.playerTemplates = new MessageBank().playerTemplates;
         if (m.coolNames == null || m.coolNames.isEmpty()) m.coolNames = new MessageBank().coolNames;
+        if (m.text == null) m.text = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : defaultText().entrySet()) m.text.putIfAbsent(e.getKey(), e.getValue());
         try (Writer w = Files.newBufferedWriter(f)) { GSON.toJson(m, w); } catch (Exception ignored) {}
         return m;
     }
