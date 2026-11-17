@@ -74,6 +74,14 @@ public final class Config {
     /** true = a single boss hit can never kill a player (leaves half a heart), unless they are already at 1 HP. */
     public boolean neverOneShot = true;
 
+    // ---- boss damage scaling ----
+    /** Global multiplier on all boss damage to players. */
+    public double bossDamageMult = 1.5;
+    /** Extra boss damage per player in range beyond minPlayers (percent each). */
+    public double damagePerExtraPlayerPercent = 8;
+    /** Cap on that extra damage (percent). */
+    public double damageScaleCapPercent = 150;
+
     // ---- toughness (silent, no messages) ----
     public boolean effectImmunity = true;
     /** Potion effects the boss and its minions shrug off (slowness covers the Frozen enchant). */
