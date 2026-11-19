@@ -25,6 +25,12 @@ public final class Config {
         public int xpMin, xpMax;
         /** Damage per hit as % of the TARGET's max health (so it stays threatening with huge health/protection). */
         public double hitPercent;
+        /** Silent damage cap: max damage one hit can do, as % of the boss's max HP. */
+        public double hitCapPercent;
+        /** Silent damage cap: max damage ONE player can do per second, as % of the boss's max HP. */
+        public double dpsCapPercent;
+        /** Whole-fight limit: ALL players combined can't deal more than maxHp / this per second (= fastest possible kill, in seconds). */
+        public double minFightSeconds;
     }
 
     public static final class RewardEntry {
@@ -58,22 +64,6 @@ public final class Config {
     public double healthPerExtraPlayerPercent = 15;
     public double healthScaleCapPercent = 300;
     public int maxMinions = 4;
-
-    // ---- boss bar ----
-    /** Bar color per tier (Common..Calamity). Colors: WHITE GREEN BLUE PURPLE YELLOW PINK RED */
-    public List<String> barColors = new ArrayList<>(List.of("WHITE", "GREEN", "BLUE", "PURPLE", "YELLOW", "PINK", "RED"));
-    /** true = color shifts one step every phase */
-    public boolean barPhaseColorShift = true;
-    public List<String> rainbowBarColors = new ArrayList<>(List.of("RED", "YELLOW", "GREEN", "BLUE", "PURPLE", "PINK", "WHITE"));
-    public int rainbowCycleTicks = 8;
-    public List<String> bloodMoonBarColors = new ArrayList<>(List.of("RED", "PINK"));
-    /** PROGRESS, NOTCHED_6, NOTCHED_10, NOTCHED_12, NOTCHED_20 */
-    public String barOverlay = "PROGRESS";
-    public boolean darkenScreen = false;
-    public boolean createFog = false;
-    public boolean bossMusic = false;
-    /** Chat color per tier (names like WHITE, GREEN, AQUA, LIGHT_PURPLE, GOLD, RED, DARK_RED, DARK_PURPLE...) */
-    public List<String> tierChatColors = new ArrayList<>(List.of("WHITE", "GREEN", "AQUA", "LIGHT_PURPLE", "GOLD", "RED", "DARK_RED"));
     /** Bosses only target/chase players within this many blocks. */
     public int targetRange = 64;
     /** How long a boss stays on one target before re-picking (seconds). */
@@ -83,6 +73,74 @@ public final class Config {
     public boolean armorBypass = true;
     /** true = a single boss hit can never kill a player (leaves half a heart), unless they are already at 1 HP. */
     public boolean neverOneShot = true;
+
+    // ---- boss damage scaling ----
+    /** Global multiplier on all boss damage to players. */
+    public double bossDamageMult = 1.5;
+    /** Extra boss damage per player in range beyond minPlayers (percent each). */
+    public double damagePerExtraPlayerPercent = 8;
+    /** Cap on that extra damage (percent). */
+    public double damageScaleCapPercent = 150;
+
+    // ---- toughness (silent, no messages) ----
+    public boolean effectImmunity = true;
+    /** Potion effects the boss and its minions shrug off (slowness covers the Frozen enchant). */
+    public List<String> immuneEffects = new ArrayList<>(List.of(
+            "slowness", "weakness", "mining_fatigue", "levitation", "wither", "poison", "blindness", "nausea"));
+    /** Fire can only visibly burn the boss this long. 0 = no burning at all. */
+    public int maxBurnSeconds = 2;
+    public boolean removeCobwebs = true;
+    /** Per-tier caps live in each tier (hitCapPercent / dpsCapPercent). */
+    public boolean damageCapEnabled = true;
+
+    // ---- totem / healing ----
+    /** Chance a boss spawns with a hidden totem that brings it back one phase when it would die. */
+    public double totemChance = 0.30;
+    /** How much of the restored phase's health bar is refilled (percent). */
+    public double totemRefillPercent = 100;
+    /** A boss can never heal more than this % of its max HP over the whole fight. */
+    public double maxTotalHealPercent = 40;
+
+    // ---- new skills ----
+    public int shieldMinSeconds = 5, shieldMaxSeconds = 10;
+    public double healPercentPerCast = 5;
+    public double reprievePercent = 5;
+    public double bloomPercent = 3;
+    public double heartHoverPercent = 5;
+    /** Heart Hover is cancelled if players deal this % of max HP during it. */
+    public double heartHoverInterruptPercent = 2;
+    public int invisSeconds = 5;
+    public double decoyScaleMin = 2, decoyScaleMax = 5;
+    public int decoySeconds = 6;
+    public double retreatHealPercent = 25;
+    public int shulkerLevitationMinSeconds = 3, shulkerLevitationMaxSeconds = 5;
+    public int splashSeconds = 4;
+
+    // ---- attack skills ----
+    public int powerUpSeconds = 15;
+    public double powerUpDamageMult = 1.5;
+    /** Power Up is broken (boss stunned 2 s) if players deal this % of max HP during the 3 s charge. */
+    public double powerUpInterruptPercent = 4;
+    public int lifeDrainSeconds = 12;
+    /** While Life Drain is active, each hit the boss lands heals it this % of max HP. */
+    public double lifeDrainHealPercent = 1.0;
+    public double ravageRadius = 24;
+    public int echoMaxRounds = 6;
+    public int ruptureSeconds = 8;
+
+    // ---- flying ----
+    /** Exact entity ids that fly (e.g. "modid:butterfly"). */
+    public List<String> flyingMobs = new ArrayList<>();
+    /** Entity ids containing one of these words (split by _) are treated as flyers. */
+    public List<String> flyingMobKeywords = new ArrayList<>(List.of(
+            "butterfly", "fly", "firefly", "dragonfly", "bird", "bat", "bee", "moth", "wasp", "bug", "wisp", "ghost"));
+    public double flyerHeightMin = 3.0;
+    public double flyerHeightMax = 6.0;
+    /** Chance a ground boss floats up while casting a ranged skill. */
+    public double hoverCastChance = 0.30;
+    public int hoverMinTier = 2;
+    public double hoverHeightMin = 3.0;
+    public double hoverHeightMax = 5.0;
 
     // ---- blood moon ----
     public double bloodMoonChance = 0.08;
@@ -123,6 +181,14 @@ public final class Config {
         tiers.add(t("Calamity", 0, 10, 12, 5, 5, 3000, 20, 1.25, 3, 4, 50, 70, 6000, 9000));
         double[] pct = {5, 6, 8, 10, 13, 16, 20};
         for (int i = 0; i < tiers.size() && i < pct.length; i++) tiers.get(i).hitPercent = pct[i];
+        double[] hitCap = {5, 4.5, 4, 3.5, 3, 2.5, 2};
+        double[] dpsCap = {10, 9, 8, 7, 6, 5, 4};
+        double[] fightSec = {90, 120, 180, 240, 360, 480, 600};
+        for (int i = 0; i < tiers.size() && i < hitCap.length; i++) {
+            tiers.get(i).hitCapPercent = hitCap[i];
+            tiers.get(i).dpsCapPercent = dpsCap[i];
+            tiers.get(i).minFightSeconds = fightSec[i];
+        }
         buildDefaultRewards();
     }
 
@@ -189,7 +255,13 @@ public final class Config {
         Config d = new Config();
         for (int i = 0; i < c.tiers.size() && i < d.tiers.size(); i++) {
             if (c.tiers.get(i).hitPercent <= 0) c.tiers.get(i).hitPercent = d.tiers.get(i).hitPercent;
+            if (c.tiers.get(i).hitCapPercent <= 0) c.tiers.get(i).hitCapPercent = d.tiers.get(i).hitCapPercent;
+            if (c.tiers.get(i).dpsCapPercent <= 0) c.tiers.get(i).dpsCapPercent = d.tiers.get(i).dpsCapPercent;
+            if (c.tiers.get(i).minFightSeconds <= 0) c.tiers.get(i).minFightSeconds = d.tiers.get(i).minFightSeconds;
         }
+        if (c.immuneEffects == null) c.immuneEffects = d.immuneEffects;
+        if (c.flyingMobs == null) c.flyingMobs = new ArrayList<>();
+        if (c.flyingMobKeywords == null) c.flyingMobKeywords = d.flyingMobKeywords;
         c.save();
         return c;
     }
