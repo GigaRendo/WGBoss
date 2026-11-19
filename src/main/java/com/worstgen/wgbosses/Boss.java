@@ -269,6 +269,39 @@ public final class Boss {
         return c.bossDamageMult * (1 + extra / 100.0);
     }
 
+    /** The team-colour API changed in 26.x, so it is set by reflection (silently skipped if it can't be). */
+    private static void colorTeamRed(PlayerTeam team) {
+        try {
+            for (java.lang.reflect.Method m : PlayerTeam.class.getMethods()) {
+                if (!m.getName().equals("setColor") || m.getParameterCount() != 1) continue;
+                Class<?> pt = m.getParameterTypes()[0];
+                Object arg = null;
+                if (pt == ChatFormatting.class) arg = ChatFormatting.RED;
+                else if (pt == Optional.class && m.getGenericParameterTypes()[0] instanceof java.lang.reflect.ParameterizedType par
+                        && par.getActualTypeArguments()[0] instanceof Class<?> tc) {
+                    Object red = null;
+                    if (tc.isEnum()) {
+                        for (Object o : tc.getEnumConstants()) if (((Enum<?>) o).name().equalsIgnoreCase("RED")) red = o;
+                    }
+                    if (red == null) {
+                        try { red = tc.getField("RED").get(null); } catch (Throwable ignored) { }
+                    }
+                    if (red == null) {
+                        for (java.lang.reflect.Method sm : tc.getMethods()) {
+                            if (java.lang.reflect.Modifier.isStatic(sm.getModifiers()) && sm.getParameterCount() == 1
+                                    && sm.getParameterTypes()[0] == ChatFormatting.class && tc.isAssignableFrom(sm.getReturnType())) {
+                                red = sm.invoke(null, ChatFormatting.RED);
+                                break;
+                            }
+                        }
+                    }
+                    if (red != null) arg = Optional.of(red);
+                }
+                if (arg != null) { m.invoke(team, arg); return; }
+            }
+        } catch (Throwable ignored) { }
+    }
+
     private void setGlow(boolean on) {
         try {
             mob.setGlowingTag(on);
@@ -277,7 +310,7 @@ public final class Boss {
             if (on) {
                 if (team == null) {
                     team = sb.addPlayerTeam("wgb_enraged");
-                    team.setColor(ChatFormatting.RED);
+                    colorTeamRed(team);
                 }
                 sb.addPlayerToTeam(mob.getScoreboardName(), team);
             } else if (team != null) {
