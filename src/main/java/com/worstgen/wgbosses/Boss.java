@@ -33,6 +33,8 @@ import net.minecraft.world.entity.ai.goal.GoalSelector;
 import net.minecraft.world.entity.ai.navigation.FlyingPathNavigation;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.Scoreboard;
 import net.minecraft.world.phys.Vec3;
 
 import java.lang.reflect.Field;
@@ -109,6 +111,17 @@ public final class Boss {
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
     private int crowd;
+    public static boolean applying;
+    public final boolean nativeAi;
+    public final Config.Arena arena;
+    private Vec3 lastSafe;
+    private int lostTicks;
+    private final List<String> affixes;
+    private boolean enraged;
+    private final long born;
+    private long thornNext, blinkAt;
+    private final Map<UUID, int[]> flight = new HashMap<>();
+    private final Map<UUID, Float> hpSeen = new HashMap<>();
     private long poolStart;
     private double poolDealt;
 
@@ -118,7 +131,13 @@ public final class Boss {
         this.trueTier = s.tier; this.calamity = s.calamity; this.rainbow = s.rainbow; this.bloodMoon = s.blood;
         this.abnormal = s.abnormal; this.personality = s.personality; this.baseName = name;
         this.flyer = detectFlyer(mob);
+        this.nativeAi = c.keepNativeBehavior && !flyer;
+        Config.Arena ar = c.arenaEnabled ? c.arenaByName(s.arena) : null;
+        this.arena = ar != null && level.dimension().identifier().toString().equals(ar.dimension) ? ar : null;
         this.hasTotem = Util.chance(c.totemChance);
+        this.affixes = new ArrayList<>(s.affixes);
+        this.born = mgr.tick;
+        this.blinkAt = mgr.tick + 200;
         this.flyHeight = Util.rdbl(c.flyerHeightMin, Math.max(c.flyerHeightMin, c.flyerHeightMax));
         Config.TierDef t = c.tiers.get(trueTier);
         this.phases = calamity ? 5 : Util.rint(t.phasesMin, t.phasesMax);
@@ -136,12 +155,15 @@ public final class Boss {
             case "SIZE" -> sizeBase = Util.rdbl(9.0, 12.0);
             default -> { }
         }
+        if (affixes.contains("SWIFT")) speedMult *= 1.3;
+        if (affixes.contains("TITAN")) { sizeBase *= 1.25; sizeEnd *= 1.25; dmgMult *= 1.2; speedMult *= 0.85; }
         this.maxHp = Math.max(20, t.health * hpMul);
         this.hp = maxHp;
 
         AttributeInstance mi = mob.getAttribute(Attributes.MOVEMENT_SPEED);
         if (mi != null) baseMove = Math.max(0.2, mi.getBaseValue());
-        clearGoals();
+        if (!nativeAi) clearGoals();
+        else setAttr(Attributes.FOLLOW_RANGE, 96);
         setAttr(Attributes.MAX_HEALTH, 1024);
         mob.setHealth(mob.getMaxHealth());
 
@@ -214,7 +236,7 @@ public final class Boss {
 
     private void toughness(long now) {
         Config c = WGBosses.config;
-        if (mob.isNoAi()) mob.setNoAi(false);
+        if (!nativeAi && mob.isNoAi()) mob.setNoAi(false);
         clearEffects(mob);
         if (mob.isOnFire()) {
             fireT++;
@@ -247,9 +269,115 @@ public final class Boss {
         return c.bossDamageMult * (1 + extra / 100.0);
     }
 
-    private double powerMul() { return mgr.tick < powerUntil ? WGBosses.config.powerUpDamageMult : 1.0; }
+    private void setGlow(boolean on) {
+        try {
+            mob.setGlowingTag(on);
+            Scoreboard sb = mgr.server.getScoreboard();
+            PlayerTeam team = sb.getPlayerTeam("wgb_enraged");
+            if (on) {
+                if (team == null) {
+                    team = sb.addPlayerTeam("wgb_enraged");
+                    team.setColor(ChatFormatting.RED);
+                }
+                sb.addPlayerToTeam(mob.getScoreboardName(), team);
+            } else if (team != null) {
+                sb.removePlayerFromTeam(mob.getScoreboardName(), team);
+            }
+        } catch (Throwable ignored) { }
+    }
 
-    private double speedBoost() { return mgr.tick < powerUntil ? 1.3 : 1.0; }
+    private void enrage() {
+        enraged = true;
+        applyPhase(phase);
+        mob.setCustomName(displayName());
+        refreshBar();
+        if (WGBosses.config.enrageGlow) setGlow(true);
+        Util.titleAll(mgr.server, Component.literal("THE BOSS IS ENRAGED!").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD),
+                displayName(), 10, 60, 20);
+        Util.soundAll(mgr.server, SoundEvents.ENDER_DRAGON_GROWL, 1f, 0.7f);
+    }
+
+    private void affixTick(long now) {
+        if (affixes.isEmpty()) return;
+        if (affixes.contains("REGENERATING") && now % 20 == 0) heal(maxHp * 0.002);
+        if (affixes.contains("WARDED") && now % 600 == 0 && cur == null && !invulnerable() && Util.chance(0.5)) {
+            shieldUntil = now + 60;
+            Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.BEACON_ACTIVATE, 2f, 1.4f);
+        }
+        if (affixes.contains("BLINKER") && now % 20 == 0 && now >= blinkAt && cur == null && target != null && transition == 0) {
+            blinkAt = now + Util.rint(240, 400);
+            Vec3 d = Util.findSafe(level, target.getX(), target.getY(), target.getZ(), 4, 7);
+            if (d != null) {
+                level.sendParticles(ParticleTypes.PORTAL, mob.getX(), mob.getY() + mob.getBbHeight() * 0.5, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
+                mob.setPos(d.x, d.y, d.z);
+                Util.sound(level, d.x, d.y, d.z, SoundEvents.ENDERMAN_TELEPORT, 2f, 1f);
+            }
+        }
+    }
+
+    /** Players heal less while fighting the boss (catches lifesteal, regen, potions). */
+    private void wound(List<ServerPlayer> ps) {
+        Config c = WGBosses.config;
+        if (!c.woundEnabled) { hpSeen.clear(); return; }
+        double red = (enraged ? c.woundEnragedReducePercent : c.woundReducePercent) / 100.0;
+        Set<UUID> seen = new HashSet<>();
+        for (ServerPlayer p : ps) {
+            UUID u = p.getUUID();
+            seen.add(u);
+            float h = p.getHealth();
+            Float last = hpSeen.get(u);
+            if (last != null && last > 0 && p.isAlive() && p.tickCount > 100 && h > last) {
+                h = (float) (last + (h - last) * (1 - red));
+                p.setHealth(h);
+            }
+            hpSeen.put(u, h);
+        }
+        hpSeen.keySet().retainAll(seen);
+    }
+
+    /** Players who stay airborne too long take escalating damage. */
+    private void flightNerf(List<ServerPlayer> ps) {
+        Config c = WGBosses.config;
+        if (!c.flightNerf) { flight.clear(); return; }
+        Set<UUID> seen = new HashSet<>();
+        for (ServerPlayer p : ps) {
+            if (p.isCreative() || p.isSpectator() || !p.isAlive()) continue;
+            UUID u = p.getUUID();
+            seen.add(u);
+            int[] f = flight.computeIfAbsent(u, k -> new int[2]);
+            boolean air = !p.onGround() && !p.isInWater() && !p.isInLava() && !p.onClimbable() && !p.isPassenger()
+                    && !p.hasEffect(MobEffects.LEVITATION);
+            int grace = c.flightGraceSeconds * 20;
+            if (air) { f[0]++; f[1] = 0; }
+            else {
+                f[0] = Math.max(0, f[0] - 5);
+                if (++f[1] >= c.flightResetSeconds * 20) f[0] = 0;
+            }
+            if (f[0] == Math.max(1, grace - 100)) {
+                Util.title(p, Component.literal("STOP FLYING!").withStyle(ChatFormatting.RED, ChatFormatting.BOLD),
+                        Component.literal("Land now or take heavy damage").withStyle(ChatFormatting.YELLOW), 5, 40, 10);
+            }
+            if (f[0] > grace && (f[0] - grace) % 20 == 0) {
+                double secs = (f[0] - grace) / 20.0;
+                double pct = Math.min(c.flightMaxPercent, c.flightStartPercent + c.flightStepPercent * (secs - 1));
+                double dmg = p.getMaxHealth() * pct / 100.0;
+                if (!c.flightLethal && p.getHealth() > 1f) dmg = Math.min(dmg, p.getHealth() - 1f);
+                applying = true;
+                try { p.hurtServer(level, level.damageSources().indirectMagic(mob, mob), (float) dmg); } finally { applying = false; }
+                level.sendParticles(ParticleTypes.CRIT, p.getX(), p.getY() + 1, p.getZ(), 12, 0.4, 0.6, 0.4, 0.1);
+            }
+        }
+        flight.keySet().retainAll(seen);
+    }
+
+    private double powerMul() {
+        double m = mgr.tick < powerUntil ? WGBosses.config.powerUpDamageMult : 1.0;
+        if (enraged) m *= WGBosses.config.enrageDamageMult;
+        if (affixes.contains("BERSERKER")) m *= 1 + 0.5 * Math.max(0, 1 - hp / maxHp);
+        return m;
+    }
+
+    private double speedBoost() { return (mgr.tick < powerUntil ? 1.3 : 1.0) * (enraged ? WGBosses.config.enrageSpeedMult : 1.0); }
 
     private boolean band(ServerPlayer p, double x, double z, double r, double w) {
         double d = Util.flat(p.getX(), p.getZ(), x, z);
@@ -356,6 +484,9 @@ public final class Boss {
         }
         tickBolts();
         tickRupture(now);
+        if (!enraged && cfg.enrageEnabled && now - born >= cfg.enrageMinutes * 1200L) enrage();
+        if (enraged && now % 10 == 0) puff(ParticleTypes.ANGRY_VILLAGER, 4);
+        affixTick(now);
         if (now < powerUntil && now % 10 == 0) puff(ParticleTypes.ANGRY_VILLAGER, 3);
         if (now < drainUntil && now % 10 == 0) puff(ParticleTypes.DAMAGE_INDICATOR, 3);
         if (now < stunUntil && now % 5 == 0) puff(ParticleTypes.CRIT, 5);
@@ -437,12 +568,21 @@ public final class Boss {
         setAttr(Attributes.KNOCKBACK_RESISTANCE, Math.min(0.9, 0.2 + size * 0.07));
         setAttr(Attributes.STEP_HEIGHT, 0.6 + size * 0.35);
         curSpeed = baseMove * pt.speedMult * (1 + 0.07 * (p - 1)) * speedMult;
-        setAttr(Attributes.MOVEMENT_SPEED, curSpeed);
+        setAttr(Attributes.MOVEMENT_SPEED, curSpeed * (nativeAi && enraged ? WGBosses.config.enrageSpeedMult : 1.0));
     }
 
     public ChatFormatting chatColor() { return CHAT[Math.min(CHAT.length - 1, displayTierIdx())]; }
 
-    public Component displayName() { return Component.literal(baseName).withStyle(chatColor(), ChatFormatting.BOLD); }
+    private String namePrefix() {
+        StringBuilder sb = new StringBuilder();
+        if (enraged) sb.append("ENRAGED ");
+        for (String a : affixes) sb.append(a.charAt(0)).append(a.substring(1).toLowerCase(Locale.ROOT)).append(' ');
+        return sb.toString();
+    }
+
+    public Component displayName() {
+        return Component.literal(namePrefix() + baseName).withStyle(enraged ? ChatFormatting.RED : chatColor(), ChatFormatting.BOLD);
+    }
 
     public String tierName() { return phaseTier(phase).name; }
 
@@ -453,6 +593,7 @@ public final class Boss {
     }
 
     private BossEvent.BossBarColor color() {
+        if (enraged) return BossEvent.BossBarColor.RED;
         if (rainbow) return PALETTE[(int) ((mgr.tick / 8) % 7)];
         if (bloodMoon) return phase % 2 == 1 ? BossEvent.BossBarColor.RED : BossEvent.BossBarColor.PINK;
         int idx = calamity ? displayTierIdx() : (trueTier + phase - 1);
@@ -503,7 +644,7 @@ public final class Boss {
     private List<ServerPlayer> inRange(List<ServerPlayer> all) {
         double r = WGBosses.config.targetRange;
         List<ServerPlayer> l = new ArrayList<>();
-        for (ServerPlayer p : all) if (p.distanceToSqr(mob) <= r * r) l.add(p);
+        for (ServerPlayer p : all) if (p.distanceToSqr(mob) <= r * r && (arena == null || inArena(p))) l.add(p);
         return l;
     }
 
@@ -518,7 +659,9 @@ public final class Boss {
         double finalDmg = Math.max(1.0, p.getMaxHealth() * pct / 100.0 * ratio);
         if (WGBosses.config.neverOneShot && p.getHealth() > 1.0f) finalDmg = Math.min(finalDmg, p.getHealth() - 1.0f);
         DamageSource src = WGBosses.config.armorBypass ? level.damageSources().indirectMagic(mob, mob) : level.damageSources().mobAttack(mob);
-        p.hurtServer(level, src, (float) finalDmg);
+        applying = true;
+        try { p.hurtServer(level, src, (float) finalDmg); } finally { applying = false; }
+        if (affixes.contains("VAMPIRIC")) heal(maxHp * 0.005);
         if (mgr.tick < drainUntil) {
             heal(maxHp * WGBosses.config.lifeDrainHealPercent / 100.0);
             level.sendParticles(ParticleTypes.HEART, mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(), 2, 0.3, 0.3, 0.3, 0.02);
@@ -606,6 +749,10 @@ public final class Boss {
             double h = heal(Math.min(eff * 0.5, reprieveRoom));
             reprieveRoom -= h;
         }
+        if (attacker != null && affixes.contains("THORNED") && mgr.tick >= thornNext) {
+            thornNext = mgr.tick + 30;
+            hurt(attacker, curDamage() * 0.15);
+        }
         if (cur == Skill.POWER_UP) {
             puDamage += eff;
             if (puDamage >= maxHp * cfg.powerUpInterruptPercent / 100.0) {
@@ -687,12 +834,21 @@ public final class Boss {
     // ------------------------------------------------------------------ main tick
     public void tick(long now) {
         if (dying) return;
-        if (mob.isRemoved() || !mob.isAlive()) { gone = true; return; }
+        if (mob.isRemoved() || !mob.isAlive()) {
+            WGBosses.LOG.warn("WGBoss #{} gone: removed={} alive={} y={} hp={}", id, mob.isRemoved(), mob.isAlive(), mob.getY(), hp);
+            gone = true;
+            return;
+        }
         mob.setHealth(mob.getMaxHealth());
         toughness(now);
         buffs(now);
+        if (nativeAi) {
+            boolean fr = cur != null || transition > 0 || now < stunUntil;
+            if (mob.isNoAi() != fr) mob.setNoAi(fr);
+        }
         mob.setAirSupply(mob.getMaxAirSupply());
         safety(now);
+        recover(now);
         if (now >= despawnAt) { mgr.despawn(this); return; }
         if (now % 5 == 0) refreshBar();
         if (now % 20 == 0) syncBar();
@@ -702,6 +858,8 @@ public final class Boss {
 
         List<ServerPlayer> ps = inRange(players());
         crowd = ps.size();
+        wound(ps);
+        flightNerf(ps);
         tickMinions(ps);
         if (ps.isEmpty()) { target = null; if (cur != null) endSkill(now); return; }
         validateTarget(ps, now);
@@ -734,16 +892,20 @@ public final class Boss {
             if (target != null && cur == null && transition <= 0) {
                 double moved = mob.position().distanceTo(lastPos);
                 double d = Util.flat(mob.getX(), mob.getZ(), target.getX(), target.getZ());
-                if (moved < 0.4 && d > mob.getBbWidth() * 0.5 + 4) stuck++; else stuck = 0;
+                double need = nativeAi ? 28 : mob.getBbWidth() * 0.5 + 4;
+                if (moved < 0.4 && d > need) stuck++; else stuck = 0;
                 if (stuck >= 2) {
-                    // teleport higher (and a little forward) until we are free
-                    double dx = target.getX() - mob.getX(), dz = target.getZ() - mob.getZ();
-                    double len = Math.max(0.01, Math.sqrt(dx * dx + dz * dz));
-                    mob.setPos(mob.getX() + dx / len * 2, mob.getY() + 2 + stuck, mob.getZ() + dz / len * 2);
-                    for (int i = 0; i < 40 && !level.noBlockCollision(mob, mob.getBoundingBox()); i++) {
-                        mob.setPos(mob.getX(), mob.getY() + 1, mob.getZ());
+                    // teleport on top of solid ground near the target
+                    Vec3 dest = arena != null ? arenaPoint() : Util.findSafe(level, target.getX(), target.getY(), target.getZ(), 6, 12);
+                    if (dest != null) teleportBoss(dest);
+                    else {
+                        mob.setPos(mob.getX(), mob.getY() + 2 + stuck, mob.getZ());
+                        for (int i = 0; i < 40 && !level.noBlockCollision(mob, mob.getBoundingBox()); i++) {
+                            mob.setPos(mob.getX(), mob.getY() + 1, mob.getZ());
+                        }
+                        mob.setDeltaMovement(Vec3.ZERO);
                     }
-                    mob.setDeltaMovement(Vec3.ZERO);
+                    stuck = 0;
                 }
             }
             lastPos = mob.position();
@@ -795,6 +957,7 @@ public final class Boss {
 
     private void move() {
         if (target == null) return;
+        if (nativeAi && !frozen() && mgr.tick >= stunUntil) { moveNative(); return; }
         face(target);
         Vec3 dm = mob.getDeltaMovement();
         if (mgr.tick < stunUntil) { mob.setDeltaMovement(0, flyer ? 0 : dm.y, 0); return; }
@@ -831,6 +994,98 @@ public final class Boss {
             hurt(target, curDamage() * 0.5);
             Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.ANVIL_LAND, 1.5f, 1.8f);
         }
+    }
+
+    private void moveNative() {
+        mob.setTarget(target);
+        double dx = target.getX() - mob.getX(), dz = target.getZ() - mob.getZ();
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (dashLeft > 0) {
+            dashLeft--;
+            if (d > 1.5) {
+                double sp = Math.min(1.2, curSpeed * 0.85 * speedBoost() * 2.4);
+                mob.setDeltaMovement(dx / d * sp, mob.getDeltaMovement().y, dz / d * sp);
+            }
+        }
+        if (rangedCd > 0) rangedCd--;
+        double reach = mob.getBbWidth() * 0.5 + 1.8;
+        if (airTicks >= 20 && rangedCd <= 0 && d > reach && target.distanceToSqr(mob) <= 40 * 40) {
+            rangedCd = 50;
+            Vec3 from = new Vec3(mob.getX(), mob.getY() + mob.getBbHeight() * 0.6, mob.getZ());
+            line(from, target.position().add(0, target.getBbHeight() * 0.5, 0), ParticleTypes.SOUL_FIRE_FLAME);
+            hurt(target, curDamage() * 0.5);
+            Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.ANVIL_LAND, 1.5f, 1.8f);
+        }
+    }
+
+    /** The mob's own attack (arrow, thrown block, bite...) landed: replace its damage with the boss damage. */
+    public boolean convertHit(ServerPlayer p, DamageSource src) {
+        if (dying || gone) return false;
+        Config c = WGBosses.config;
+        boolean proj = src.getDirectEntity() != null && src.getDirectEntity() != mob;
+        hurt(p, curDamage() * (proj ? c.nativeProjectileRatio : c.nativeMeleeRatio));
+        if (!proj) Util.push(p, mob.getX(), mob.getZ(), 0.5, 0.25);
+        return true;
+    }
+
+    private boolean inArena(ServerPlayer p) {
+        Config c = WGBosses.config;
+        double dx = p.getX() - arena.x, dz = p.getZ() - arena.z;
+        double r = arena.radius + 8;
+        return dx * dx + dz * dz <= r * r;
+    }
+
+    private Vec3 arenaPoint() {
+        Config c = WGBosses.config;
+        Vec3 p = Util.findSafe(level, arena.x, arena.y, arena.z, 0, arena.radius * 0.5);
+        if (p == null || Math.abs(p.y - arena.y) > c.arenaYRange + 1) p = new Vec3(arena.x, arena.y, arena.z);
+        return p;
+    }
+
+    private void teleportBoss(Vec3 d) {
+        double h = mob.getBbHeight() * 0.5;
+        level.sendParticles(ParticleTypes.PORTAL, mob.getX(), mob.getY() + h, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
+        mob.setPos(d.x, d.y, d.z);
+        mob.setDeltaMovement(Vec3.ZERO);
+        mob.getNavigation().stop();
+        level.sendParticles(ParticleTypes.PORTAL, d.x, d.y + h, d.z, 40, 0.5, 0.8, 0.5, 0.3);
+        Util.sound(level, d.x, d.y, d.z, SoundEvents.ENDERMAN_TELEPORT, 2f, 0.8f);
+        lastPos = mob.position();
+        stuck = 0;
+    }
+
+    /** Keeps the boss out of holes and inside the arena (silent teleport, no "vanished" message). */
+    private void recover(long now) {
+        if (now % 10 != 0 || transition > 0 || cur == Skill.DECOY_SWAP) return;
+        Config c = WGBosses.config;
+        boolean bad = false;
+        if (arena != null) {
+            double dx = mob.getX() - arena.x, dz = mob.getZ() - arena.z;
+            if (dx * dx + dz * dz > arena.radius * arena.radius) bad = true;
+            if (!flyer && cur == null && Math.abs(mob.getY() - arena.y) > c.arenaYRange) bad = true;
+        }
+        ServerPlayer ref = null;
+        if (!bad && !flyer && cur == null) {
+            double best = 128 * 128;
+            for (ServerPlayer p : players()) {
+                double dd = p.distanceToSqr(mob);
+                if (dd < best) { best = dd; ref = p; }
+            }
+            if (ref != null && mob.getY() < ref.getY() - c.fallRescueDepth) bad = true;
+        }
+        if (!bad) {
+            lostTicks = 0;
+            if (mob.onGround()) lastSafe = mob.position();
+            return;
+        }
+        lostTicks += 10;
+        if (lostTicks < 40) return;
+        lostTicks = 0;
+        Vec3 dest = null;
+        if (arena != null) dest = arenaPoint();
+        else if (ref != null) dest = Util.findSafe(level, ref.getX(), ref.getY(), ref.getZ(), 3, 8);
+        if (dest == null) dest = lastSafe;
+        if (dest != null) teleportBoss(dest);
     }
 
     private void moveFlyer() {
@@ -1586,6 +1841,7 @@ public final class Boss {
 
     public void discardAll() {
         clearDecoys();
+        if (enraged) setGlow(false);
         mob.setNoGravity(false);
         bar.removeAllPlayers();
         for (Mob m : minions) { mgr.minionOwner.remove(m.getUUID()); m.discard(); }
