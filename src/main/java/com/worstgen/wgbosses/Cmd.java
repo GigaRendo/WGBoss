@@ -34,8 +34,6 @@ public final class Cmd {
     private static final SuggestionProvider<CommandSourceStack> STATS = (ctx, b) ->
             SharedSuggestionProvider.suggest(List.of("kills", "damage", "calamity", "highest", "mvp"), b);
 
-    private static Component T(String key, Object... kv) { return WGBosses.bank.msg(key, kv); }
-
     private static boolean admin(CommandSourceStack s) { return s.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER); }
 
     public static void register(CommandDispatcher<CommandSourceStack> d, CommandBuildContext ctx) {
@@ -48,8 +46,8 @@ public final class Cmd {
                                         .executes(c -> spawn(c, mob(c), StringArgumentType.getString(c, "tier"))))))
                 .then(Commands.literal("kill").requires(Cmd::admin).executes(c -> {
                     boolean ok = WGBosses.MANAGER.adminKill();
-                    if (ok) c.getSource().sendSuccess(() -> T("cmd.kill.ok"), true);
-                    else c.getSource().sendFailure(T("cmd.kill.none"));
+                    if (ok) c.getSource().sendSuccess(() -> Component.literal("Boss removed (no drops)."), true);
+                    else c.getSource().sendFailure(Component.literal("No boss is active."));
                     return ok ? 1 : 0;
                 }))
                 .then(Commands.literal("toggle").requires(Cmd::admin).executes(c -> {
@@ -57,14 +55,23 @@ public final class Cmd {
                     cfg.autoSpawn = !cfg.autoSpawn;
                     cfg.save();
                     if (cfg.autoSpawn) WGBosses.MANAGER.scheduleNext();
-                    Component s = T(cfg.autoSpawn ? "cmd.toggle.on" : "cmd.toggle.off");
-                    c.getSource().sendSuccess(() -> s, true);
+                    String s = cfg.autoSpawn ? "Automatic boss spawns are now ON (new timer started)." : "Automatic boss spawns are now OFF.";
+                    c.getSource().sendSuccess(() -> Component.literal(s), true);
                     return 1;
                 }))
                 .then(Commands.literal("bloodmoon").requires(Cmd::admin).executes(Cmd::bloodMoon))
                 .then(Commands.literal("reload").requires(Cmd::admin).executes(c -> {
                     WGBosses.reloadAll();
-                    c.getSource().sendSuccess(() -> T("cmd.reload"), true);
+                    c.getSource().sendSuccess(() -> Component.literal("WGBosses config reloaded."), true);
+                    return 1;
+                }))
+                .then(Commands.literal("flyers").requires(Cmd::admin).executes(c -> {
+                    ServerPlayer p = c.getSource().getPlayer();
+                    ServerLevel lvl = p != null ? (ServerLevel) p.level() : c.getSource().getServer().overworld();
+                    List<String> l = WGBosses.MANAGER.flyerIds(lvl);
+                    String s = l.isEmpty() ? "No flying mobs detected in the boss pool."
+                            : l.size() + " flying mobs: " + String.join(", ", l.subList(0, Math.min(40, l.size())));
+                    c.getSource().sendSuccess(() -> Component.literal(s), false);
                     return 1;
                 }))
                 .then(Commands.literal("tp")
@@ -72,7 +79,7 @@ public final class Cmd {
                             ServerPlayer p = c.getSource().getPlayer();
                             if (p == null) return 0;
                             String err = WGBosses.MANAGER.teleport(p, IntegerArgumentType.getInteger(c, "id"));
-                            if (err != null) { c.getSource().sendFailure(T(err)); return 0; }
+                            if (err != null) { c.getSource().sendFailure(Component.literal(err)); return 0; }
                             return 1;
                         })))
                 .then(Commands.literal("top")
@@ -83,12 +90,12 @@ public final class Cmd {
                     Boss b = WGBosses.MANAGER.first();
                     if (b == null) {
                         long t = WGBosses.MANAGER.ticksUntilNext();
-                        Component s = !WGBosses.config.autoSpawn ? T("info.off") : t < 0 ? T("info.unscheduled") : T("info.next", "min", t / 1200 + 1);
-                        c.getSource().sendSuccess(() -> s, false);
+                        String s = !WGBosses.config.autoSpawn ? "Automatic spawns are OFF (/wgboss toggle)." : t < 0 ? "A boss is not scheduled right now." : "No boss active. Next one in about " + (t / 1200 + 1) + " min.";
+                        c.getSource().sendSuccess(() -> Component.literal(s), false);
                     } else {
-                        Component s = T("info.boss", "tier", b.tierName(), "boss", b.baseName, "phase", b.phase, "phases", b.phases,
-                                "hp", Math.round(100 * b.hp / b.maxHp));
-                        c.getSource().sendSuccess(() -> s, false);
+                        String s = "[" + b.tierName() + "] " + b.baseName + " - Phase " + b.phase + "/" + b.phases
+                                + " - " + Math.round(100 * b.hp / b.maxHp) + "% HP";
+                        c.getSource().sendSuccess(() -> Component.literal(s), false);
                     }
                     return 1;
                 })));
@@ -107,33 +114,36 @@ public final class Cmd {
 
     private static int spawn(CommandContext<CommandSourceStack> c, EntityType<?> type, String tierName) {
         ServerPlayer p = anchor(c);
-        if (p == null) { c.getSource().sendFailure(T("cmd.noplayer")); return 0; }
+        if (p == null) { c.getSource().sendFailure(Component.literal("No player online to spawn near.")); return 0; }
         int tier = -1;
         if (!tierName.equalsIgnoreCase("random")) {
             tier = WGBosses.config.tierIndex(tierName);
-            if (tier < 0) { c.getSource().sendFailure(T("cmd.badtier", "tier", tierName)); return 0; }
+            if (tier < 0) { c.getSource().sendFailure(Component.literal("Unknown tier: " + tierName)); return 0; }
         }
         ServerLevel lvl = (ServerLevel) p.level();
         boolean ok = WGBosses.MANAGER.adminSpawn(lvl, p, type, tier);
-        if (!ok) { c.getSource().sendFailure(T("cmd.spawnfail")); return 0; }
+        if (!ok) { c.getSource().sendFailure(Component.literal("Could not spawn that boss (see server log).")); return 0; }
         return 1;
     }
 
     private static int bloodMoon(CommandContext<CommandSourceStack> c) {
         ServerPlayer p = anchor(c);
-        if (p == null) { c.getSource().sendFailure(T("cmd.noplayer")); return 0; }
+        if (p == null) { c.getSource().sendFailure(Component.literal("No player online.")); return 0; }
         return WGBosses.MANAGER.adminBloodMoon((ServerLevel) p.level(), p) ? 1 : 0;
     }
 
     private static int top(CommandContext<CommandSourceStack> c, String stat) {
         List<Map.Entry<String, Double>> l = WGBosses.stats.top(stat, 5);
-        String tk = switch (stat) {
-            case "damage", "calamity", "highest", "mvp" -> stat;
-            default -> "kills";
+        String label = switch (stat) {
+            case "damage" -> "Top damage";
+            case "calamity" -> "Calamity kills";
+            case "highest" -> "Highest tier killed";
+            case "mvp" -> "MVP (most damage) wins";
+            default -> "Top boss kills";
         };
-        c.getSource().sendSuccess(() -> T("top.title." + tk), false);
+        c.getSource().sendSuccess(() -> Component.literal("== " + label + " ==").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
         if (l.isEmpty()) {
-            c.getSource().sendSuccess(() -> T("top.empty"), false);
+            c.getSource().sendSuccess(() -> Component.literal("Nothing recorded yet.").withStyle(ChatFormatting.GRAY), false);
             return 1;
         }
         int i = 1;
@@ -142,8 +152,8 @@ public final class Cmd {
             if (stat.equals("highest")) val = WGBosses.config.tiers.get(Math.max(0, (int) Math.round(e.getValue()) - 1)).name;
             else if (stat.equals("damage")) val = String.valueOf(Math.round(e.getValue()));
             else val = String.valueOf(Math.round(e.getValue()));
-            Component line = T("top.line", "rank", i, "player", e.getKey(), "value", val);
-            c.getSource().sendSuccess(() -> line, false);
+            String line = "#" + i + " " + e.getKey() + " - " + val;
+            c.getSource().sendSuccess(() -> Component.literal(line).withStyle(ChatFormatting.YELLOW), false);
             i++;
         }
         return 1;
