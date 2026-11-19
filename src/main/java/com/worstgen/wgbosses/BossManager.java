@@ -43,6 +43,8 @@ public final class BossManager {
         public boolean calamity, rainbow, blood;
         public String abnormal = "";
         public String personality;
+        public List<String> affixes = new ArrayList<>();
+        public String arena;
     }
 
     private final Set<String> persisted = new HashSet<>();
@@ -94,6 +96,8 @@ public final class BossManager {
     private List<EntityType<?>> pool;
     private long nextSpawn = -1;
     private boolean nextBlood;
+    private int endedTier = -1, lowStreak;
+    private Config.Arena nextArena;
     private int nextId = 1;
 
     private Config cfg() { return WGBosses.config; }
@@ -118,7 +122,14 @@ public final class BossManager {
 
     public void scheduleNext() {
         Config c = cfg();
-        nextSpawn = tick + Util.rint(c.spawnMinMinutes * 1200, c.spawnMaxMinutes * 1200);
+        int mn = c.spawnMinMinutes, mx = c.spawnMaxMinutes;
+        if (c.tierCooldowns && endedTier >= 0 && endedTier < c.tiers.size() && c.tiers.get(endedTier).cooldownMaxMinutes > 0) {
+            mn = c.tiers.get(endedTier).cooldownMinMinutes;
+            mx = Math.max(mn, c.tiers.get(endedTier).cooldownMaxMinutes);
+        }
+        endedTier = -1;
+        nextArena = pickArena();
+        nextSpawn = tick + Util.rint(mn * 1200, mx * 1200);
         nextBlood = Util.chance(c.bloodMoonChance);
         warned.clear();
     }
@@ -187,7 +198,7 @@ public final class BossManager {
         boolean blood = nextBlood;
         Component title = Component.literal(blood ? "THE BLOOD MOON APPROACHES" : "!! BOSS INCOMING !!")
                 .withStyle(blood ? ChatFormatting.DARK_RED : ChatFormatting.GOLD, ChatFormatting.BOLD);
-        String when = minutes == 1 ? "1 minute" : minutes + " minutes";
+        String when = (minutes == 1 ? "1 minute" : minutes + " minutes") + (nextArena != null ? " in arena " + nextArena.name : "");
         Component sub = Component.literal((blood ? "Something terrible spawns in " : "A boss spawns in ") + when + " - gear up!")
                 .withStyle(blood ? ChatFormatting.RED : ChatFormatting.YELLOW);
         Util.titleAll(server, title, sub, 10, 80, 20);
@@ -278,11 +289,12 @@ public final class BossManager {
         else if (!blood && Util.chance(c.calamityChance)) s.tier = cal;
         else {
             int max = blood ? Math.min(c.bloodMoonMaxTierIndex, cal - 1) : cal - 1;
+            int min = (forced < 0 && !blood && c.pityEnabled && lowStreak >= c.pityStreak) ? Math.min(c.pityMinTier, max) : 0;
             int total = 0;
-            for (int i = 0; i <= max; i++) if (i != avoid) total += c.tiers.get(i).weight;
+            for (int i = min; i <= max; i++) if (i != avoid) total += c.tiers.get(i).weight;
             int roll = total <= 0 ? 0 : Util.rint(1, total);
-            s.tier = 0;
-            for (int i = 0; i <= max; i++) {
+            s.tier = min;
+            for (int i = min; i <= max; i++) {
                 if (i == avoid) continue;
                 roll -= c.tiers.get(i).weight;
                 if (roll <= 0) { s.tier = i; break; }
@@ -293,6 +305,11 @@ public final class BossManager {
         s.rainbow = !s.calamity && Util.chance(c.rainbowChance);
         if (s.rainbow) s.abnormal = Util.pick(List.of("SPEED", "HEALTH", "DAMAGE", "SIZE"));
         s.personality = Util.pick(PERSONALITIES);
+        if (c.affixesEnabled && s.tier >= c.affixMinTier && !c.affixPool.isEmpty() && Util.chance(c.affixChance)) {
+            List<String> pl = new ArrayList<>(c.affixPool);
+            s.affixes.add(pl.remove(Util.rint(0, pl.size() - 1)));
+            if (s.tier >= c.affixSecondMinTier && !pl.isEmpty() && Util.chance(c.affixSecondChance)) s.affixes.add(pl.remove(Util.rint(0, pl.size() - 1)));
+        }
         return s;
     }
 
@@ -322,32 +339,90 @@ public final class BossManager {
         return pos != null ? pos : new Vec3(p.getX() + min, p.getY() + 1, p.getZ());
     }
 
+    private Config.Arena pickArena() {
+        Config c = cfg();
+        if (!c.arenaEnabled || c.arenas.isEmpty()) return null;
+        return Util.pick(c.arenas);
+    }
+
+    private ServerLevel arenaLevel(Config.Arena a) {
+        for (ServerLevel l : server.getAllLevels()) {
+            if (l.dimension().identifier().toString().equals(a.dimension)) return l;
+        }
+        return null;
+    }
+
+    private Vec3 arenaSpawn(ServerLevel lvl, Config.Arena a) {
+        Config c = cfg();
+        Vec3 p = Util.findSafe(lvl, a.x, a.y, a.z, 0, a.radius * 0.5);
+        if (p == null || Math.abs(p.y - a.y) > c.arenaYRange + 1) p = new Vec3(a.x, a.y, a.z);
+        return p;
+    }
+
     private void spawnAuto() {
         Config c = cfg();
+        if (c.arenaEnabled && !c.arenas.isEmpty()) {
+            Config.Arena ar = (nextArena != null && c.arenas.contains(nextArena)) ? nextArena : pickArena();
+            ServerLevel al = ar == null ? null : arenaLevel(ar);
+            if (al != null) {
+                Vec3 ap = arenaSpawn(al, ar);
+                boolean aok = nextBlood ? spawnBloodMoon(al, ap, ar) : spawnOne(al, null, -1, ap, ar);
+                nextSpawn = aok ? Long.MAX_VALUE : tick + 1200;
+                return;
+            }
+        }
         List<ServerPlayer> cands = new ArrayList<>();
         for (ServerPlayer p : server.getPlayerList().getPlayers()) {
             if (p.level() instanceof ServerLevel sl && c.allowedDimensions.contains(sl.dimension().identifier().toString())) cands.add(p);
         }
         if (cands.isEmpty()) { nextSpawn = tick + 1200; return; }
-        ServerPlayer p = Util.pick(cands);
-        ServerLevel lvl = (ServerLevel) p.level();
-        Vec3 pos = spawnPoint(p, lvl, c.spawnMinDistance, c.spawnMaxDistance);
+        ServerLevel lvl = null;
+        Vec3 pos = null;
+        for (int i = 0; i < 8 && pos == null; i++) {
+            ServerPlayer p = Util.pick(cands);
+            ServerLevel pl = (ServerLevel) p.level();
+            Vec3 q = spawnPoint(p, pl, c.spawnMinDistance, c.spawnMaxDistance);
+            if (!inZone(pl, q)) { pos = q; lvl = pl; }
+        }
+        if (pos == null) { nextSpawn = tick + 1200; return; }
         boolean ok = nextBlood ? spawnBloodMoon(lvl, pos) : spawnOne(lvl, null, -1, pos);
         if (ok) nextSpawn = Long.MAX_VALUE; else nextSpawn = tick + 1200;
     }
 
+    private boolean inZone(ServerLevel lvl, Vec3 pos) {
+        String dim = lvl.dimension().identifier().toString();
+        for (Config.Zone z : cfg().noSpawnZones) {
+            if (z.dimension != null && !z.dimension.isEmpty() && !z.dimension.equals(dim)) continue;
+            double dx = pos.x - z.x, dz = pos.z - z.z;
+            if (dx * dx + dz * dz <= z.radius * z.radius) return true;
+        }
+        return false;
+    }
+
     private boolean spawnOne(ServerLevel lvl, EntityType<?> type, int tier, Vec3 pos) {
+        return spawnOne(lvl, type, tier, pos, null);
+    }
+
+    private boolean spawnOne(ServerLevel lvl, EntityType<?> type, int tier, Vec3 pos, Config.Arena arena) {
         EntityType<?> t = type != null ? type : randomMob(lvl);
-        Boss b = spawnBoss(lvl, t, pos, rollSpec(tier, false, -1));
+        Spec sp = rollSpec(tier, false, -1);
+        if (arena != null) sp.arena = arena.name;
+        Boss b = spawnBoss(lvl, t, pos, sp);
         if (b == null) return false;
+        if (tier < 0) lowStreak = b.trueTier <= cfg().pityLowTier ? lowStreak + 1 : 0;
         announce(List.of(b), false);
         say(b, "spawn", null, true);
         return true;
     }
 
     public boolean spawnBloodMoon(ServerLevel lvl, Vec3 pos) {
+        return spawnBloodMoon(lvl, pos, null);
+    }
+
+    public boolean spawnBloodMoon(ServerLevel lvl, Vec3 pos, Config.Arena arena) {
         Spec a = rollSpec(-1, true, -1);
         Spec b2 = rollSpec(-1, true, a.tier);
+        if (arena != null) { a.arena = arena.name; b2.arena = arena.name; }
         Boss one = spawnBoss(lvl, randomMob(lvl), pos, a);
         if (one == null) return false;
         Vec3 p2 = Util.findSafe(lvl, pos.x, pos.y, pos.z, 5, 8);
@@ -363,8 +438,11 @@ public final class BossManager {
     /** Admin spawn: kills any existing boss silently first. */
     public boolean adminSpawn(ServerLevel lvl, ServerPlayer near, EntityType<?> type, int tier) {
         killAllSilently();
-        Vec3 pos = spawnPoint(near, lvl, 8, 15);
-        boolean ok = spawnOne(lvl, type, tier, pos);
+        Vec3 pos;
+        Config.Arena aa = pickArena();
+        ServerLevel al = aa != null ? arenaLevel(aa) : null;
+        if (al != null) { lvl = al; pos = arenaSpawn(al, aa); } else { pos = spawnPoint(near, lvl, 8, 15); aa = null; }
+        boolean ok = spawnOne(lvl, type, tier, pos, aa);
         nextSpawn = ok ? Long.MAX_VALUE : tick + 1200;
         return ok;
     }
@@ -386,6 +464,7 @@ public final class BossManager {
     private void removeBoss(Boss b) {
         bosses.remove(b);
         byMob.remove(b.mob.getUUID());
+        endedTier = Math.max(endedTier, b.trueTier);
         if (bosses.isEmpty()) scheduleNext();
     }
 
@@ -415,7 +494,7 @@ public final class BossManager {
             MutableComponent m = prefix();
             m.append(Component.literal("[" + b.tierName() + "] ").withStyle(b.chatColor()));
             m.append(b.displayName());
-            m.append(Component.literal(" spawned in the " + dim + " near " + ax + ", " + ay + ", " + az + "!  ").withStyle(ChatFormatting.YELLOW));
+            m.append(Component.literal(" spawned in the " + dim + " near " + ax + ", " + ay + ", " + az + (b.arena != null ? " [arena " + b.arena.name + "]" : "") + "!  ").withStyle(ChatFormatting.YELLOW));
             if (b.rainbow) m.append(Component.literal("(RAINBOW: abnormal " + b.abnormal.toLowerCase(Locale.ROOT) + ")  ").withStyle(ChatFormatting.LIGHT_PURPLE));
             m.append(tpLink(b, bs.size() > 1 ? "[Click to Teleport #" + n + "]" : "[Click to Teleport]"));
             Util.broadcast(server, m);
@@ -633,6 +712,11 @@ public final class BossManager {
     public boolean allowDamage(LivingEntity e, DamageSource src, float amount) {
         Boss b = byMob.get(e.getUUID());
         if (b != null) return b.onDamage(src, amount);
+        if (e instanceof ServerPlayer sp && !Boss.applying) {
+            Entity at = src.getEntity();
+            Boss ob = at == null ? null : byMob.get(at.getUUID());
+            if (ob != null && ob.nativeAi && ob.convertHit(sp, src)) return false;
+        }
         if (minionOwner.containsKey(e.getUUID()) && e.getHealth() - amount <= 0) {
             toDiscard.add(e); // minions never drop loot
             return false;
