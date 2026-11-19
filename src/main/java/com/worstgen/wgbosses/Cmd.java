@@ -1,6 +1,7 @@
 package com.worstgen.wgbosses;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -50,6 +51,64 @@ public final class Cmd {
                     else c.getSource().sendFailure(Component.literal("No boss is active."));
                     return ok ? 1 : 0;
                 }))
+                .then(Commands.literal("arena").requires(Cmd::admin)
+                        .then(Commands.literal("set")
+                                .then(Commands.argument("name", StringArgumentType.word())
+                                        .then(Commands.argument("x", DoubleArgumentType.doubleArg())
+                                                .then(Commands.argument("y", DoubleArgumentType.doubleArg())
+                                                        .then(Commands.argument("z", DoubleArgumentType.doubleArg())
+                                                                .then(Commands.argument("radius", IntegerArgumentType.integer(5, 1000)).executes(c -> {
+                                                                    Config cfg = WGBosses.config;
+                                                                    String name = StringArgumentType.getString(c, "name");
+                                                                    Config.Arena a = cfg.arenaByName(name);
+                                                                    if (a == null) { a = new Config.Arena(); a.name = name; cfg.arenas.add(a); }
+                                                                    a.x = DoubleArgumentType.getDouble(c, "x");
+                                                                    a.y = DoubleArgumentType.getDouble(c, "y");
+                                                                    a.z = DoubleArgumentType.getDouble(c, "z");
+                                                                    a.radius = IntegerArgumentType.getInteger(c, "radius");
+                                                                    a.dimension = c.getSource().getLevel().dimension().identifier().toString();
+                                                                    cfg.arenaEnabled = true;
+                                                                    cfg.save();
+                                                                    String msg = "Arena '" + name + "' saved (" + Math.round(a.x) + " " + Math.round(a.y) + " "
+                                                                            + Math.round(a.z) + ", radius " + Math.round(a.radius) + "). Arenas: " + cfg.arenas.size() + ", arena mode ON.";
+                                                                    c.getSource().sendSuccess(() -> Component.literal(msg), true);
+                                                                    return 1;
+                                                                })))))))
+                        .then(Commands.literal("remove")
+                                .then(Commands.argument("name", StringArgumentType.word()).executes(c -> {
+                                    Config cfg = WGBosses.config;
+                                    String name = StringArgumentType.getString(c, "name");
+                                    Config.Arena a = cfg.arenaByName(name);
+                                    if (a == null) { c.getSource().sendFailure(Component.literal("No arena named " + name)); return 0; }
+                                    cfg.arenas.remove(a);
+                                    cfg.save();
+                                    c.getSource().sendSuccess(() -> Component.literal("Arena '" + name + "' removed. Arenas left: " + cfg.arenas.size()), true);
+                                    return 1;
+                                })))
+                        .then(Commands.literal("on").executes(c -> {
+                            WGBosses.config.arenaEnabled = true;
+                            WGBosses.config.save();
+                            c.getSource().sendSuccess(() -> Component.literal("Arena mode ON (bosses spawn in a random arena)."), true);
+                            return 1;
+                        }))
+                        .then(Commands.literal("off").executes(c -> {
+                            WGBosses.config.arenaEnabled = false;
+                            WGBosses.config.save();
+                            c.getSource().sendSuccess(() -> Component.literal("Arena mode OFF (bosses spawn anywhere)."), true);
+                            return 1;
+                        }))
+                        .then(Commands.literal("list").executes(c -> {
+                            Config cfg = WGBosses.config;
+                            StringBuilder sb = new StringBuilder("Arena mode " + (cfg.arenaEnabled ? "ON" : "OFF") + ". Arenas: ");
+                            if (cfg.arenas.isEmpty()) sb.append("none");
+                            for (Config.Arena a : cfg.arenas) {
+                                sb.append("\n- ").append(a.name).append(" ").append(a.dimension).append(" ").append(Math.round(a.x)).append(" ")
+                                        .append(Math.round(a.y)).append(" ").append(Math.round(a.z)).append(" r").append(Math.round(a.radius));
+                            }
+                            String out = sb.toString();
+                            c.getSource().sendSuccess(() -> Component.literal(out), false);
+                            return 1;
+                        })))
                 .then(Commands.literal("toggle").requires(Cmd::admin).executes(c -> {
                     Config cfg = WGBosses.config;
                     cfg.autoSpawn = !cfg.autoSpawn;
