@@ -31,6 +31,13 @@ public final class Config {
         public double dpsCapPercent;
         /** Whole-fight limit: ALL players combined can't deal more than maxHp / this per second (= fastest possible kill, in seconds). */
         public double minFightSeconds;
+        /** Wait before the next boss after this tier's boss ends (minutes). */
+        public int cooldownMinMinutes, cooldownMaxMinutes;
+    }
+
+    public static final class Zone {
+        public String dimension = "minecraft:overworld";
+        public double x = 0, z = 0, radius = 200;
     }
 
     public static final class RewardEntry {
@@ -73,6 +80,70 @@ public final class Config {
     public boolean armorBypass = true;
     /** true = a single boss hit can never kill a player (leaves half a heart), unless they are already at 1 HP. */
     public boolean neverOneShot = true;
+
+    // ---- native behaviour / arena / rescue ----
+    /** true = the mob keeps its own AI (bows, thrown ice blocks, ...) and the boss adds skills on top. */
+    public boolean keepNativeBehavior = true;
+    /** Boss melee hit = this x a normal boss hit (percent-of-max-HP system). */
+    public double nativeMeleeRatio = 1.0;
+    /** Boss projectile/ranged hit = this x a normal boss hit. */
+    public double nativeProjectileRatio = 0.7;
+    /** Boss that ends up this many blocks below the nearest player is teleported back up. */
+    public double fallRescueDepth = 6;
+    /** true = bosses only spawn in the arenas below (a random one each time). */
+    public boolean arenaEnabled = false;
+    public List<Arena> arenas = new ArrayList<>();
+    /** Boss stays within this many blocks above/below the arena's y. */
+    public double arenaYRange = 3;
+
+    public static final class Arena {
+        public String name = "";
+        public String dimension = "minecraft:overworld";
+        public double x = 0, y = 64, z = 0, radius = 50;
+    }
+
+    public Arena arenaByName(String n) {
+        if (n == null) return null;
+        for (Arena a : arenas) if (a.name.equalsIgnoreCase(n)) return a;
+        return null;
+    }
+
+    // ---- spawn timing / zones ----
+    /** After a boss ends, the wait for the next one depends on that boss's tier (see tiers). */
+    public boolean tierCooldowns = true;
+    public boolean pityEnabled = true;
+    /** After this many bosses in a row at pityLowTier or below, the next is at least pityMinTier. */
+    public int pityStreak = 3;
+    public int pityLowTier = 2;
+    public int pityMinTier = 3;
+    /** Auto-spawns never happen inside these circles (edit x/z/radius; dimension id). */
+    public List<Zone> noSpawnZones = new ArrayList<>(List.of(new Zone()));
+
+    // ---- affixes ----
+    public boolean affixesEnabled = true;
+    public int affixMinTier = 2;
+    public double affixChance = 0.6;
+    public int affixSecondMinTier = 3;
+    public double affixSecondChance = 0.35;
+    public List<String> affixPool = new ArrayList<>(List.of(
+            "SWIFT", "VAMPIRIC", "THORNED", "BERSERKER", "REGENERATING", "WARDED", "BLINKER", "TITAN"));
+
+    // ---- enrage / wound / flight nerf ----
+    public boolean enrageEnabled = true;
+    public int enrageMinutes = 8;
+    public double enrageDamageMult = 1.5;
+    public double enrageSpeedMult = 1.25;
+    public boolean enrageGlow = true;
+    public boolean woundEnabled = true;
+    public double woundReducePercent = 50;
+    public double woundEnragedReducePercent = 75;
+    public boolean flightNerf = true;
+    public int flightGraceSeconds = 10;
+    public double flightStartPercent = 5;
+    public double flightStepPercent = 2;
+    public double flightMaxPercent = 25;
+    public int flightResetSeconds = 3;
+    public boolean flightLethal = true;
 
     // ---- boss damage scaling ----
     /** Global multiplier on all boss damage to players. */
@@ -184,10 +255,14 @@ public final class Config {
         double[] hitCap = {5, 4.5, 4, 3.5, 3, 2.5, 2};
         double[] dpsCap = {10, 9, 8, 7, 6, 5, 4};
         double[] fightSec = {90, 120, 180, 240, 360, 480, 600};
+        int[] cdMin = {20, 25, 30, 35, 40, 45, 60};
+        int[] cdMax = {30, 35, 40, 45, 50, 55, 75};
         for (int i = 0; i < tiers.size() && i < hitCap.length; i++) {
             tiers.get(i).hitCapPercent = hitCap[i];
             tiers.get(i).dpsCapPercent = dpsCap[i];
             tiers.get(i).minFightSeconds = fightSec[i];
+            tiers.get(i).cooldownMinMinutes = cdMin[i];
+            tiers.get(i).cooldownMaxMinutes = cdMax[i];
         }
         buildDefaultRewards();
     }
@@ -258,8 +333,15 @@ public final class Config {
             if (c.tiers.get(i).hitCapPercent <= 0) c.tiers.get(i).hitCapPercent = d.tiers.get(i).hitCapPercent;
             if (c.tiers.get(i).dpsCapPercent <= 0) c.tiers.get(i).dpsCapPercent = d.tiers.get(i).dpsCapPercent;
             if (c.tiers.get(i).minFightSeconds <= 0) c.tiers.get(i).minFightSeconds = d.tiers.get(i).minFightSeconds;
+            if (c.tiers.get(i).cooldownMaxMinutes <= 0) {
+                c.tiers.get(i).cooldownMinMinutes = d.tiers.get(i).cooldownMinMinutes;
+                c.tiers.get(i).cooldownMaxMinutes = d.tiers.get(i).cooldownMaxMinutes;
+            }
         }
         if (c.immuneEffects == null) c.immuneEffects = d.immuneEffects;
+        if (c.arenas == null) c.arenas = new ArrayList<>();
+        if (c.noSpawnZones == null) c.noSpawnZones = d.noSpawnZones;
+        if (c.affixPool == null) c.affixPool = d.affixPool;
         if (c.flyingMobs == null) c.flyingMobs = new ArrayList<>();
         if (c.flyingMobKeywords == null) c.flyingMobKeywords = d.flyingMobKeywords;
         c.save();
