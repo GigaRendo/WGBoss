@@ -98,6 +98,12 @@ public final class BossManager {
     private boolean nextBlood;
     private int endedTier = -1, lowStreak;
     private Config.Arena nextArena;
+    private boolean paused, testSpawn, itemsChecked;
+    private java.time.ZonedDateTime lastCheck;
+    private final Deque<Config.Event> pendingEvents = new ArrayDeque<>();
+    private long pendingSince;
+    private final Map<UUID, List<String>> noteGot = new HashMap<>();
+    private final Map<UUID, List<String>> uniqueGot = new HashMap<>();
     private int nextId = 1;
 
     private Config cfg() { return WGBosses.config; }
@@ -134,6 +140,131 @@ public final class BossManager {
         warned.clear();
     }
 
+    public net.minecraft.world.InteractionResult onUseBlock(net.minecraft.world.entity.player.Player pl, net.minecraft.world.InteractionHand hand) {
+        Config c = cfg();
+        if (!c.blockPlacingInArenaDuringFight || bosses.isEmpty() || !(pl instanceof ServerPlayer sp) || sp.isCreative()) {
+            return net.minecraft.world.InteractionResult.PASS;
+        }
+        if (!(sp.getItemInHand(hand).getItem() instanceof net.minecraft.world.item.BlockItem)) return net.minecraft.world.InteractionResult.PASS;
+        for (Boss b : bosses) {
+            if (b.arena == null || b.level != sp.level()) continue;
+            double dx = sp.getX() - b.arena.x, dz = sp.getZ() - b.arena.z;
+            if (dx * dx + dz * dz <= b.arena.radius * b.arena.radius) {
+                sp.sendSystemMessage(Component.literal("You can't place blocks during a boss fight.").withStyle(ChatFormatting.RED));
+                return net.minecraft.world.InteractionResult.FAIL;
+            }
+        }
+        return net.minecraft.world.InteractionResult.PASS;
+    }
+
+    private void chk(List<String> out, String id) {
+        if (id == null || id.isBlank()) return;
+        if (Rewards.itemOrNull(id) == null && !out.contains(id)) out.add(id);
+    }
+
+    /** Logs reward items / arenas / events that point at something that does not exist. */
+    public void checkItems() {
+        Config c = cfg();
+        List<String> missing = new ArrayList<>();
+        chk(missing, c.shardItem);
+        if (c.vitalEmberEnabled) chk(missing, c.vitalEmberItem);
+        for (Map<String, List<Config.RewardEntry>> map : List.of(c.rewards, c.perPlayerRewards, c.topDamageBonusRewards)) {
+            for (List<Config.RewardEntry> l : map.values()) if (l != null) for (Config.RewardEntry e : l) if (e != null) chk(missing, e.item);
+        }
+        if (missing.isEmpty()) WGBosses.LOG.info("WGBosses: all reward items were found.");
+        for (String s : missing) WGBosses.LOG.warn("WGBosses: reward item not found (it will be skipped): {}", s);
+        for (Config.Arena a : c.arenas) {
+            if (arenaLevel(a) == null) WGBosses.LOG.warn("WGBosses: arena '{}' uses dimension '{}' which was not found", a.name, a.dimension);
+        }
+        for (Config.Event e : c.events) {
+            if (c.tierIndex(e.tier) < 0) WGBosses.LOG.warn("WGBosses: event '{}' has unknown tier '{}'", e.name, e.tier);
+            if (e.arena != null && !e.arena.isBlank() && c.arenaByName(e.arena) == null) WGBosses.LOG.warn("WGBosses: event '{}' uses unknown arena '{}'", e.name, e.arena);
+        }
+    }
+
+    private java.time.ZoneId zone() {
+        try {
+            String z = cfg().eventTimezone;
+            return z == null || z.isBlank() ? java.time.ZoneId.systemDefault() : java.time.ZoneId.of(z.trim());
+        } catch (Throwable t) {
+            return java.time.ZoneId.systemDefault();
+        }
+    }
+
+    private static boolean dayMatches(String day, java.time.DayOfWeek dow) {
+        if (day == null) return true;
+        String d = day.trim().toUpperCase(Locale.ROOT);
+        if (d.equals("DAILY") || d.equals("EVERYDAY") || d.isEmpty()) return true;
+        return d.length() >= 3 && dow.name().startsWith(d);
+    }
+
+    private void tickEvents() {
+        Config c = cfg();
+        if (!c.eventsEnabled || c.events.isEmpty()) { lastCheck = null; pendingEvents.clear(); return; }
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(zone());
+        if (lastCheck == null) { lastCheck = now; return; }
+        for (Config.Event e : new ArrayList<>(c.events)) {
+            if (e == null || !e.enabled) continue;
+            java.time.ZonedDateTime cand = now.toLocalDate().atTime(Math.floorMod(e.hour, 24), Math.floorMod(e.minute, 60)).atZone(now.getZone());
+            if (!dayMatches(e.day, cand.getDayOfWeek())) continue;
+            if (e.warnMinutes > 0) {
+                java.time.ZonedDateTime w = cand.minusMinutes(e.warnMinutes);
+                if (w.isAfter(lastCheck) && !w.isAfter(now)) {
+                    Util.broadcast(server, prefix().append(Component.literal("EVENT: a guaranteed " + e.tier + " boss (" + e.name + ") spawns in "
+                            + e.warnMinutes + " minutes" + (e.arena == null || e.arena.isBlank() ? "" : " in arena " + e.arena) + "!")
+                            .withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)));
+                }
+            }
+            if (cand.isAfter(lastCheck) && !cand.isAfter(now)) { pendingEvents.add(e); pendingSince = tick; }
+        }
+        lastCheck = now;
+        if (!pendingEvents.isEmpty()) {
+            if (bosses.isEmpty()) runEvent(pendingEvents.poll());
+            else if (tick - pendingSince > 12000) pendingEvents.clear();
+        }
+    }
+
+    /** Spawns the event's guaranteed boss right now. */
+    public boolean runEvent(Config.Event e) {
+        Config c = cfg();
+        int tier = c.tierIndex(e.tier);
+        if (tier < 0) { WGBosses.LOG.warn("Event '{}' has unknown tier '{}'", e.name, e.tier); return false; }
+        EntityType<?> type = null;
+        if (e.mob != null && !e.mob.isBlank()) {
+            net.minecraft.resources.Identifier id = net.minecraft.resources.Identifier.tryParse(e.mob.trim());
+            if (id != null) {
+                Optional<EntityType<?>> o = BuiltInRegistries.ENTITY_TYPE.getOptional(id);
+                if (o.isPresent()) type = o.get();
+            }
+        }
+        Config.Arena a = e.arena == null || e.arena.isBlank() ? null : c.arenaByName(e.arena);
+        ServerLevel lvl = a == null ? null : arenaLevel(a);
+        Vec3 pos;
+        if (lvl != null) {
+            pos = arenaSpawn(lvl, a);
+        } else {
+            a = null;
+            List<ServerPlayer> cands = new ArrayList<>();
+            for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                if (p.level() instanceof ServerLevel sl && c.allowedDimensions.contains(sl.dimension().identifier().toString())) cands.add(p);
+            }
+            if (cands.isEmpty()) return false;
+            ServerPlayer p = Util.pick(cands);
+            lvl = (ServerLevel) p.level();
+            pos = spawnPoint(p, lvl, c.spawnMinDistance, c.spawnMaxDistance);
+        }
+        boolean ok = spawnOne(lvl, type, tier, pos, a);
+        if (ok) nextSpawn = Long.MAX_VALUE;
+        return ok;
+    }
+
+    public boolean paused() { return paused; }
+    public void pause(boolean p) { paused = p; }
+    public void setNext(int minutes) { nextSpawn = tick + minutes * 1200L; warned.clear(); nextArena = pickArena(); }
+    public void skip() { nextBlood = Util.chance(cfg().bloodMoonChance); nextArena = pickArena(); }
+    public String nextArenaName() { return nextArena != null ? nextArena.name : "-"; }
+    public List<Boss> all() { return new ArrayList<>(bosses); }
+
     public long ticksUntilNext() { return nextSpawn == Long.MAX_VALUE ? -1 : nextSpawn - tick; }
 
     // ------------------------------------------------------------------ tick
@@ -164,6 +295,11 @@ public final class BossManager {
         }
 
         if (nextSpawn < 0) scheduleNext();
+        if (paused && nextSpawn != Long.MAX_VALUE) nextSpawn++;
+        if (!itemsChecked && tick > 100) { itemsChecked = true; checkItems(); }
+        if (tick % 20 == 0) {
+            try { tickEvents(); } catch (Throwable t) { WGBosses.LOG.error("Event check failed", t); }
+        }
 
         for (Boss b : new ArrayList<>(bosses)) {
             if (b.dying) continue;
@@ -327,6 +463,8 @@ public final class BossManager {
             b.resetDespawn(tick);
             bosses.add(b);
             byMob.put(m.getUUID(), b);
+            b.noRewards = testSpawn;
+            testSpawn = false;
             return b;
         } catch (Throwable t) {
             WGBosses.LOG.error("Failed to spawn boss", t);
@@ -437,7 +575,12 @@ public final class BossManager {
 
     /** Admin spawn: kills any existing boss silently first. */
     public boolean adminSpawn(ServerLevel lvl, ServerPlayer near, EntityType<?> type, int tier) {
+        return adminSpawn(lvl, near, type, tier, false);
+    }
+
+    public boolean adminSpawn(ServerLevel lvl, ServerPlayer near, EntityType<?> type, int tier, boolean test) {
         killAllSilently();
+        testSpawn = test;
         Vec3 pos;
         Config.Arena aa = pickArena();
         ServerLevel al = aa != null ? arenaLevel(aa) : null;
@@ -499,6 +642,7 @@ public final class BossManager {
             m.append(tpLink(b, bs.size() > 1 ? "[Click to Teleport #" + n + "]" : "[Click to Teleport]"));
             Util.broadcast(server, m);
             n++;
+            Discord.spawn(b);
         }
     }
 
@@ -571,7 +715,7 @@ public final class BossManager {
 
         // rewards: split between everyone who fought, top damage dealer gets a bonus
         Rewards.Result rr = Rewards.roll(b);
-        Map<UUID, Component> rewardMsgs = distribute(b, sorted, topId, rr);
+        Map<UUID, Component> rewardMsgs = b.noRewards ? new LinkedHashMap<>() : distribute(b, sorted, topId, rr);
 
         // chat, spaced out: defeated -> last words -> top damage -> rankings -> rewards
         List<Component> rankLines = new ArrayList<>();
@@ -598,7 +742,7 @@ public final class BossManager {
 
         // stats
         Config c = cfg();
-        for (Map.Entry<UUID, Double> e : sorted) {
+        if (!b.noRewards) for (Map.Entry<UUID, Double> e : sorted) {
             Stats.E s = WGBosses.stats.get(e.getKey(), null);
             s.damage += e.getValue();
             if (e.getValue() / b.maxHp * 100.0 >= c.participationPercentForStats) {
@@ -609,6 +753,29 @@ public final class BossManager {
             if (e.getKey().equals(topId)) s.mvp++;
         }
         WGBosses.stats.save();
+
+        if (!b.noRewards) {
+            List<String> top3 = new ArrayList<>();
+            int rk = 1;
+            for (Map.Entry<UUID, Double> e : sorted) {
+                if (rk > 3) break;
+                top3.add("#" + rk + " " + nameOf(e.getKey()) + " - " + Math.round(e.getValue()) + " damage");
+                rk++;
+            }
+            Discord.kill(b, top3);
+            if (c.topKillersAfterKill && b.trueTier >= c.topKillersMinTier) {
+                later(Util.rint(200, 400), () -> {
+                    List<Map.Entry<String, Double>> tk = WGBosses.stats.top("kills", c.topKillersCount);
+                    if (tk.isEmpty()) return;
+                    Util.broadcast(server, prefix().append(Component.literal("Top boss killers on the server:").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)));
+                    int r = 1;
+                    for (Map.Entry<String, Double> e : tk) {
+                        Util.broadcast(server, Component.literal("  #" + r + " " + e.getKey() + " - " + Math.round(e.getValue()) + " kills").withStyle(ChatFormatting.YELLOW));
+                        r++;
+                    }
+                });
+            }
+        }
 
         b.discardAll();
         removeBoss(b);
@@ -628,16 +795,101 @@ public final class BossManager {
         }
     }
 
+    /** Per-player extras: shards, vital ember, unique rewards. */
+    private void extras(Boss b, ServerPlayer p, boolean isTop) {
+        Config c = cfg();
+        Config.TierDef t = c.tiers.get(b.trueTier);
+        double mult = b.rewardMultiplier();
+        Stats.E st = WGBosses.stats.get(p.getUUID(), p.getName().getString());
+        if (c.streakEnabled) {
+            st.streak++;
+            st.bestStreak = Math.max(st.bestStreak, st.streak);
+            if (st.streak >= 2) {
+                double bonus = Math.min(c.streakCapPercent, c.streakStepPercent * (st.streak - 1));
+                mult += bonus / 100.0;
+                noteGot.computeIfAbsent(p.getUUID(), k -> new ArrayList<>()).add("Streak x" + st.streak + " (+" + Math.round(bonus) + "% shards)");
+            }
+            if (st.streak >= c.streakAnnounceMin) {
+                final String nm = p.getName().getString();
+                final int sk = st.streak;
+                later(300, () -> Util.broadcast(server, prefix().append(Component.literal(nm + " is on a " + sk + " boss kill streak!").withStyle(ChatFormatting.GOLD))));
+            }
+        }
+        if (c.dailyBonusEnabled && c.dailyBonusShards > 0) {
+            String today = java.time.LocalDate.now().toString();
+            if (!today.equals(st.lastDaily)) {
+                net.minecraft.world.item.Item ds = Rewards.itemOrNull(c.shardItem);
+                if (ds != null) {
+                    st.lastDaily = today;
+                    give(p, ds, c.dailyBonusShards);
+                    noteGot.computeIfAbsent(p.getUUID(), k -> new ArrayList<>()).add("Daily first-kill bonus +" + c.dailyBonusShards + " shards");
+                }
+            }
+        }
+        if (c.slayerBuffEnabled && b.trueTier >= c.slayerBuffMinTier) {
+            int secs = c.slayerBuffSecondsPerTier * (b.trueTier + 1);
+            for (String bn : c.slayerBuffs) {
+                net.minecraft.core.Holder<net.minecraft.world.effect.MobEffect> ef = slayerEffect(bn);
+                if (ef != null) p.addEffect(new net.minecraft.world.effect.MobEffectInstance(ef, secs * 20, 0));
+            }
+            noteGot.computeIfAbsent(p.getUUID(), k -> new ArrayList<>()).add("Slayer buff " + Math.max(1, secs / 60) + " min");
+        }
+        if (c.shardsPerPlayer) {
+            net.minecraft.world.item.Item shard = Rewards.itemOrNull(c.shardItem);
+            if (shard != null) {
+                int n = (int) Math.round(Util.rint(t.shardPlayerMin, Math.max(t.shardPlayerMin, t.shardPlayerMax)) * mult);
+                if (isTop) n += Util.rint(c.topBonusShardMin, Math.max(c.topBonusShardMin, c.topBonusShardMax));
+                if (n > 0) give(p, shard, n);
+            }
+        }
+        if (c.vitalEmberEnabled && t.emberChance > 0 && Util.chance(Math.min(1.0, t.emberChance * mult))) {
+            net.minecraft.world.item.Item em = Rewards.itemOrNull(c.vitalEmberItem);
+            if (em != null) give(p, em, 1);
+        }
+        for (Config.UniqueReward u : c.uniqueRewards) {
+            if (u == null || u.command == null || u.command.isBlank()) continue;
+            if (b.trueTier < u.minTier || b.trueTier > u.maxTier || (u.topOnly && !isTop)) continue;
+            if (!Util.chance(u.chance)) continue;
+            runCommand(u.command.replace("%player%", p.getName().getString()));
+            uniqueGot.computeIfAbsent(p.getUUID(), k -> new ArrayList<>()).add(u.name);
+        }
+    }
+
+    private static net.minecraft.core.Holder<net.minecraft.world.effect.MobEffect> slayerEffect(String n) {
+        return switch (n == null ? "" : n.trim().toLowerCase(Locale.ROOT)) {
+            case "strength" -> net.minecraft.world.effect.MobEffects.STRENGTH;
+            case "luck" -> net.minecraft.world.effect.MobEffects.LUCK;
+            case "regeneration" -> net.minecraft.world.effect.MobEffects.REGENERATION;
+            case "speed" -> net.minecraft.world.effect.MobEffects.SPEED;
+            case "haste" -> net.minecraft.world.effect.MobEffects.HASTE;
+            case "resistance" -> net.minecraft.world.effect.MobEffects.RESISTANCE;
+            case "absorption" -> net.minecraft.world.effect.MobEffects.ABSORPTION;
+            default -> null;
+        };
+    }
+
+    private void runCommand(String cmd) {
+        try {
+            String line = cmd.startsWith("/") ? cmd.substring(1) : cmd;
+            server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), line);
+        } catch (Throwable t) {
+            WGBosses.LOG.error("Unique reward command failed: {}", cmd, t);
+        }
+    }
+
     private Map<UUID, Component> distribute(Boss b, List<Map.Entry<UUID, Double>> sorted, UUID topId, Rewards.Result rr) {
         got.clear();
         gotXp.clear();
-        double minDmg = b.maxHp * cfg().participationPercentForStats / 100.0;
+        uniqueGot.clear();
+        noteGot.clear();
+        double minDmg = b.maxHp * cfg().lootMinDamagePercent / 100.0;
         List<ServerPlayer> part = new ArrayList<>();
         List<Double> dmg = new ArrayList<>();
         double total = 0;
         for (Map.Entry<UUID, Double> e : sorted) {
             ServerPlayer p = server.getPlayerList().getPlayer(e.getKey());
             if (p == null || !p.isAlive() || e.getValue() < minDmg) continue;
+            if (p.level() != b.level || p.distanceTo(b.mob) > cfg().lootMaxDistance) continue;
             part.add(p); dmg.add(e.getValue()); total += e.getValue();
         }
         Map<UUID, Component> out = new LinkedHashMap<>();
@@ -656,6 +908,7 @@ public final class BossManager {
         for (ItemStack st : rr.bonus()) give(top, st.getItem(), st.getCount());
         for (ServerPlayer p : part) {
             for (ItemStack st : Rewards.rollPerPlayer(b)) give(p, st.getItem(), st.getCount());
+            extras(b, p, p == top);
         }
         for (int i = 0; i < part.size(); i++) {
             int x = rr.xp() > 0 ? (int) (rr.xp() * dmg.get(i) / total) : 0;
@@ -681,6 +934,22 @@ public final class BossManager {
                 if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
                 first = false;
                 msg.append(Component.literal(xp + " XP").withStyle(ChatFormatting.GREEN));
+            }
+            List<String> ul = uniqueGot.get(p.getUUID());
+            if (ul != null) {
+                for (String un : ul) {
+                    if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                    first = false;
+                    msg.append(Component.literal("UNIQUE: " + un).withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD));
+                }
+            }
+            List<String> nl = noteGot.get(p.getUUID());
+            if (nl != null) {
+                for (String nn : nl) {
+                    if (!first) msg.append(Component.literal(", ").withStyle(ChatFormatting.GRAY));
+                    first = false;
+                    msg.append(Component.literal(nn).withStyle(ChatFormatting.AQUA));
+                }
             }
             if (first) msg.append(Component.literal("nothing this time").withStyle(ChatFormatting.GRAY));
             if (p == top) msg.append(Component.literal("  (includes top damage bonus!)").withStyle(ChatFormatting.LIGHT_PURPLE));
@@ -726,6 +995,7 @@ public final class BossManager {
 
     public void afterDeath(LivingEntity e, DamageSource src) {
         if (!(e instanceof ServerPlayer p) || bosses.isEmpty()) return;
+        WGBosses.stats.get(p.getUUID(), null).streak = 0;
         Entity a = src.getEntity();
         if (a == null) return;
         Boss b = byMob.get(a.getUUID());
