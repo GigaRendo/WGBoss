@@ -217,6 +217,12 @@ public final class Config {
     public double enrageDamageMult = 1.5;
     public double enrageSpeedMult = 1.25;
     public boolean enrageGlow = true;
+    /** false = the boss never shows fire (flames hide it). */
+    public boolean showBossFire = false;
+    public double woundHealReducePercent = 85;
+    public double woundEnragedHealReducePercent = 100;
+    /** Players near the boss can heal at most this % of max HP per second (lifesteal, regen, potions). */
+    public double woundHealCapPercentPerSecond = 4;
     public boolean woundEnabled = true;
     public double woundReducePercent = 50;
     public double woundEnragedReducePercent = 75;
