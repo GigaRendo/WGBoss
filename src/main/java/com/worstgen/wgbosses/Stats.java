@@ -22,6 +22,8 @@ public final class Stats {
         public int kills, calamity, mvp;
         public int highest = -1;
         public double damage;
+        public int streak, bestStreak;
+        public String lastDaily = "";
     }
 
     private Map<String, E> players = new HashMap<>();
@@ -70,6 +72,7 @@ public final class Stats {
                 case "calamity" -> e.calamity;
                 case "highest" -> e.highest + 1;
                 case "mvp" -> e.mvp;
+                case "streak" -> e.bestStreak;
                 default -> e.kills;
             };
             if (v > 0) out.add(Map.entry(e.name, v));
