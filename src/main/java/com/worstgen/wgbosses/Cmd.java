@@ -33,7 +33,19 @@ public final class Cmd {
         return SharedSuggestionProvider.suggest(l, b);
     };
     private static final SuggestionProvider<CommandSourceStack> STATS = (ctx, b) ->
-            SharedSuggestionProvider.suggest(List.of("kills", "damage", "calamity", "highest", "mvp"), b);
+            SharedSuggestionProvider.suggest(List.of("kills", "damage", "calamity", "highest", "mvp", "streak"), b);
+    private static final SuggestionProvider<CommandSourceStack> DAYS = (ctx, b) ->
+            SharedSuggestionProvider.suggest(List.of("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "daily"), b);
+    private static final SuggestionProvider<CommandSourceStack> ARENAS = (ctx, b) -> {
+        List<String> l = new ArrayList<>();
+        for (Config.Arena a : WGBosses.config.arenas) l.add(a.name);
+        return SharedSuggestionProvider.suggest(l, b);
+    };
+    private static final SuggestionProvider<CommandSourceStack> EVENTS = (ctx, b) -> {
+        List<String> l = new ArrayList<>();
+        for (Config.Event e : WGBosses.config.events) l.add(e.name);
+        return SharedSuggestionProvider.suggest(l, b);
+    };
 
     private static boolean admin(CommandSourceStack s) { return s.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER); }
 
@@ -45,6 +57,122 @@ public final class Cmd {
                                 .executes(c -> spawn(c, mob(c), "random"))
                                 .then(Commands.argument("tier", StringArgumentType.word()).suggests(TIERS)
                                         .executes(c -> spawn(c, mob(c), StringArgumentType.getString(c, "tier"))))))
+                .then(Commands.literal("locate").executes(c -> {
+                    Boss b = WGBosses.MANAGER.first();
+                    ServerPlayer me = c.getSource().getPlayer();
+                    if (b == null) { c.getSource().sendFailure(Component.literal("No boss is active.")); return 0; }
+                    String where = b.arena != null ? " (arena " + b.arena.name + ")" : "";
+                    String msg;
+                    if (me == null || me.level() != b.level) {
+                        msg = "The boss is in the " + b.level.dimension().identifier().getPath() + where + ".";
+                    } else {
+                        double dx = b.mob.getX() - me.getX(), dz = b.mob.getZ() - me.getZ();
+                        double deg = Math.toDegrees(Math.atan2(dx, -dz));
+                        if (deg < 0) deg += 360;
+                        String[] dirs = {"north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"};
+                        String dir = dirs[(int) Math.round(deg / 45.0) % 8];
+                        msg = "The boss is about " + Math.round(Math.sqrt(dx * dx + dz * dz) / 10.0) * 10 + " blocks to the " + dir + where + ".";
+                    }
+                    c.getSource().sendSuccess(() -> Component.literal(msg).withStyle(ChatFormatting.YELLOW), false);
+                    return 1;
+                }))
+                .then(Commands.literal("event").requires(Cmd::admin)
+                        .then(Commands.literal("add")
+                                .then(Commands.argument("name", StringArgumentType.word())
+                                        .then(Commands.argument("day", StringArgumentType.word()).suggests(DAYS)
+                                                .then(Commands.argument("hour", IntegerArgumentType.integer(0, 23))
+                                                        .then(Commands.argument("minute", IntegerArgumentType.integer(0, 59))
+                                                                .then(Commands.argument("tier", StringArgumentType.word()).suggests(TIERS)
+                                                                        .executes(c -> addEvent(c, ""))
+                                                                        .then(Commands.argument("arena", StringArgumentType.word()).suggests(ARENAS)
+                                                                                .executes(c -> addEvent(c, StringArgumentType.getString(c, "arena"))))))))))
+                        .then(Commands.literal("remove")
+                                .then(Commands.argument("name", StringArgumentType.word()).suggests(EVENTS).executes(c -> {
+                                    String name = StringArgumentType.getString(c, "name");
+                                    boolean removed = WGBosses.config.events.removeIf(e -> e.name.equalsIgnoreCase(name));
+                                    if (!removed) { c.getSource().sendFailure(Component.literal("No event named " + name)); return 0; }
+                                    WGBosses.config.save();
+                                    c.getSource().sendSuccess(() -> Component.literal("Event '" + name + "' removed."), true);
+                                    return 1;
+                                })))
+                        .then(Commands.literal("run")
+                                .then(Commands.argument("name", StringArgumentType.word()).suggests(EVENTS).executes(c -> {
+                                    String name = StringArgumentType.getString(c, "name");
+                                    for (Config.Event e : WGBosses.config.events) {
+                                        if (e.name.equalsIgnoreCase(name)) {
+                                            boolean ok = WGBosses.MANAGER.runEvent(e);
+                                            if (!ok) { c.getSource().sendFailure(Component.literal("Could not run that event (see server log).")); return 0; }
+                                            return 1;
+                                        }
+                                    }
+                                    c.getSource().sendFailure(Component.literal("No event named " + name));
+                                    return 0;
+                                })))
+                        .then(Commands.literal("on").executes(c -> {
+                            WGBosses.config.eventsEnabled = true;
+                            WGBosses.config.save();
+                            c.getSource().sendSuccess(() -> Component.literal("Scheduled events ON."), true);
+                            return 1;
+                        }))
+                        .then(Commands.literal("off").executes(c -> {
+                            WGBosses.config.eventsEnabled = false;
+                            WGBosses.config.save();
+                            c.getSource().sendSuccess(() -> Component.literal("Scheduled events OFF."), true);
+                            return 1;
+                        }))
+                        .then(Commands.literal("list").executes(c -> {
+                            Config cfg = WGBosses.config;
+                            StringBuilder sb = new StringBuilder("Events " + (cfg.eventsEnabled ? "ON" : "OFF") + " (time zone "
+                                    + (cfg.eventTimezone == null || cfg.eventTimezone.isBlank() ? java.time.ZoneId.systemDefault().toString() : cfg.eventTimezone) + "): ");
+                            if (cfg.events.isEmpty()) sb.append("none");
+                            for (Config.Event e : cfg.events) {
+                                sb.append("\n- ").append(e.name).append(": ").append(e.day).append(" ")
+                                        .append(String.format("%02d:%02d", e.hour, e.minute)).append(" ").append(e.tier)
+                                        .append(e.arena == null || e.arena.isBlank() ? "" : " @" + e.arena).append(e.enabled ? "" : " (disabled)");
+                            }
+                            String out = sb.toString();
+                            c.getSource().sendSuccess(() -> Component.literal(out), false);
+                            return 1;
+                        })))
+                .then(Commands.literal("spawntest").requires(Cmd::admin)
+                        .executes(c -> spawn(c, null, "random", true))
+                        .then(Commands.argument("mob", ResourceArgument.resource(ctx, Registries.ENTITY_TYPE))
+                                .executes(c -> spawn(c, mob(c), "random", true))
+                                .then(Commands.argument("tier", StringArgumentType.word()).suggests(TIERS)
+                                        .executes(c -> spawn(c, mob(c), StringArgumentType.getString(c, "tier"), true)))))
+                .then(Commands.literal("debug").requires(Cmd::admin).executes(c -> {
+                    List<Boss> l = WGBosses.MANAGER.all();
+                    if (l.isEmpty()) { c.getSource().sendFailure(Component.literal("No boss is active.")); return 0; }
+                    for (Boss b : l) {
+                        for (String s : b.debugLines()) {
+                            WGBosses.LOG.info("[debug] {}", s);
+                            c.getSource().sendSuccess(() -> Component.literal(s), false);
+                        }
+                    }
+                    return 1;
+                }))
+                .then(Commands.literal("next").requires(Cmd::admin)
+                        .then(Commands.argument("minutes", IntegerArgumentType.integer(0, 1440)).executes(c -> {
+                            int mins = IntegerArgumentType.getInteger(c, "minutes");
+                            WGBosses.MANAGER.setNext(mins);
+                            c.getSource().sendSuccess(() -> Component.literal("Next boss in " + mins + " min."), true);
+                            return 1;
+                        })))
+                .then(Commands.literal("pause").requires(Cmd::admin).executes(c -> {
+                    WGBosses.MANAGER.pause(true);
+                    c.getSource().sendSuccess(() -> Component.literal("Spawn timer paused."), true);
+                    return 1;
+                }))
+                .then(Commands.literal("resume").requires(Cmd::admin).executes(c -> {
+                    WGBosses.MANAGER.pause(false);
+                    c.getSource().sendSuccess(() -> Component.literal("Spawn timer resumed."), true);
+                    return 1;
+                }))
+                .then(Commands.literal("skip").requires(Cmd::admin).executes(c -> {
+                    WGBosses.MANAGER.skip();
+                    c.getSource().sendSuccess(() -> Component.literal("Rerolled the next boss event and arena."), true);
+                    return 1;
+                }))
                 .then(Commands.literal("kill").requires(Cmd::admin).executes(c -> {
                     boolean ok = WGBosses.MANAGER.adminKill();
                     if (ok) c.getSource().sendSuccess(() -> Component.literal("Boss removed (no drops)."), true);
@@ -121,6 +249,7 @@ public final class Cmd {
                 .then(Commands.literal("bloodmoon").requires(Cmd::admin).executes(Cmd::bloodMoon))
                 .then(Commands.literal("reload").requires(Cmd::admin).executes(c -> {
                     WGBosses.reloadAll();
+                    WGBosses.MANAGER.checkItems();
                     c.getSource().sendSuccess(() -> Component.literal("WGBosses config reloaded."), true);
                     return 1;
                 }))
@@ -171,7 +300,37 @@ public final class Cmd {
         return all.isEmpty() ? null : Util.pick(all);
     }
 
+    private static int addEvent(CommandContext<CommandSourceStack> c, String arenaName) {
+        Config cfg = WGBosses.config;
+        String name = StringArgumentType.getString(c, "name");
+        String day = StringArgumentType.getString(c, "day").toUpperCase(Locale.ROOT);
+        String tier = StringArgumentType.getString(c, "tier").toLowerCase(Locale.ROOT);
+        List<String> days = List.of("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY", "DAILY");
+        if (!days.contains(day)) { c.getSource().sendFailure(Component.literal("Day must be monday..sunday or daily.")); return 0; }
+        if (cfg.tierIndex(tier) < 0) { c.getSource().sendFailure(Component.literal("Unknown tier: " + tier)); return 0; }
+        if (!arenaName.isEmpty() && cfg.arenaByName(arenaName) == null) { c.getSource().sendFailure(Component.literal("Unknown arena: " + arenaName + " (see /wgboss arena list)")); return 0; }
+        cfg.events.removeIf(e -> e.name.equalsIgnoreCase(name));
+        Config.Event e = new Config.Event();
+        e.name = name;
+        e.day = day;
+        e.hour = IntegerArgumentType.getInteger(c, "hour");
+        e.minute = IntegerArgumentType.getInteger(c, "minute");
+        e.tier = tier;
+        e.arena = arenaName;
+        cfg.events.add(e);
+        cfg.eventsEnabled = true;
+        cfg.save();
+        String msg = "Event '" + name + "' saved: " + day + " " + String.format("%02d:%02d", e.hour, e.minute) + " " + tier
+                + (arenaName.isEmpty() ? "" : " in arena " + arenaName) + " (server time zone " + java.time.ZoneId.systemDefault() + ").";
+        c.getSource().sendSuccess(() -> Component.literal(msg), true);
+        return 1;
+    }
+
     private static int spawn(CommandContext<CommandSourceStack> c, EntityType<?> type, String tierName) {
+        return spawn(c, type, tierName, false);
+    }
+
+    private static int spawn(CommandContext<CommandSourceStack> c, EntityType<?> type, String tierName, boolean test) {
         ServerPlayer p = anchor(c);
         if (p == null) { c.getSource().sendFailure(Component.literal("No player online to spawn near.")); return 0; }
         int tier = -1;
@@ -180,7 +339,7 @@ public final class Cmd {
             if (tier < 0) { c.getSource().sendFailure(Component.literal("Unknown tier: " + tierName)); return 0; }
         }
         ServerLevel lvl = (ServerLevel) p.level();
-        boolean ok = WGBosses.MANAGER.adminSpawn(lvl, p, type, tier);
+        boolean ok = WGBosses.MANAGER.adminSpawn(lvl, p, type, tier, test);
         if (!ok) { c.getSource().sendFailure(Component.literal("Could not spawn that boss (see server log).")); return 0; }
         return 1;
     }
@@ -198,6 +357,7 @@ public final class Cmd {
             case "calamity" -> "Calamity kills";
             case "highest" -> "Highest tier killed";
             case "mvp" -> "MVP (most damage) wins";
+            case "streak" -> "Best boss kill streak";
             default -> "Top boss kills";
         };
         c.getSource().sendSuccess(() -> Component.literal("== " + label + " ==").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
