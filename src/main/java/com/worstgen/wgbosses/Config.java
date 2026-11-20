@@ -33,6 +33,37 @@ public final class Config {
         public double minFightSeconds;
         /** Wait before the next boss after this tier's boss ends (minutes). */
         public int cooldownMinMinutes, cooldownMaxMinutes;
+        /** Shards EVERY participant gets (when shardsPerPlayer is on). */
+        public int shardPlayerMin, shardPlayerMax;
+        /** Chance (0-1) per participant to receive the vital ember. */
+        public double emberChance;
+        /** Skill names this tier's boss can use as its final-phase ultimate (one is picked). */
+        public List<String> ultimates = new ArrayList<>();
+        /** Skills this tier never uses. */
+        public List<String> disabledSkills = new ArrayList<>();
+    }
+
+    public static final class Event {
+        public String name = "";
+        /** MONDAY..SUNDAY or DAILY */
+        public String day = "SATURDAY";
+        public int hour = 20, minute = 0;
+        public String tier = "mythic";
+        /** Arena name; empty = random place near a player. */
+        public String arena = "";
+        /** Entity id (e.g. minecraft:zombie); empty = random mob. */
+        public String mob = "";
+        public int warnMinutes = 5;
+        public boolean enabled = true;
+    }
+
+    public static final class UniqueReward {
+        public String name = "Unique item";
+        /** Console command run for the winner, e.g. give %player% minecraft:diamond_sword[custom_name='\"Boss Slayer\"'] */
+        public String command = "";
+        public double chance = 0.05;
+        public int minTier = 4, maxTier = 6;
+        public boolean topOnly = false;
     }
 
     public static final class Zone {
@@ -81,6 +112,56 @@ public final class Config {
     /** true = a single boss hit can never kill a player (leaves half a heart), unless they are already at 1 HP. */
     public boolean neverOneShot = true;
 
+    // ---- rewards (build 5) ----
+    /** true = every participant gets the full shard amount of the tier. */
+    public boolean shardsPerPlayer = true;
+    public int topBonusShardMin = 30, topBonusShardMax = 50;
+    /** Players who dealt less than this % of the boss's max HP get no loot. */
+    public double lootMinDamagePercent = 2.0;
+    /** Players farther than this from the boss when it dies get no loot. */
+    public double lootMaxDistance = 128;
+    public double rainbowRewardBonusPercent = 15;
+    public double affixRewardBonusPercent = 10;
+    public boolean vitalEmberEnabled = true;
+    public String vitalEmberItem = "remnant_mobs:vital_ember";
+    /** Empty by default = no unique items. Add entries to hand out named items / commands. */
+    public List<UniqueReward> uniqueRewards = new ArrayList<>();
+
+    // ---- announcements / discord / skills / visuals (build 5) ----
+    public boolean topKillersAfterKill = true;
+    public int topKillersMinTier = 2;
+    public int topKillersCount = 5;
+    public String discordWebhookUrl = "";
+    public boolean discordOnSpawn = true;
+    public boolean discordOnKill = true;
+    public int discordMinTier = 0;
+    /** Skill names (enum names like SMASH, RAVAGE) that no boss will use. */
+    public List<String> disabledSkills = new ArrayList<>();
+    /** 0.3-1.0: lowers particle counts if fights lag players. */
+    public double particleScale = 1.0;
+
+    // ---- scheduled events / extras (build 6) ----
+    /** Fixed-time guaranteed bosses. Empty by default; add with /wgboss event add ... */
+    public boolean eventsEnabled = true;
+    /** Java time zone id (e.g. Asia/Manila). Empty = the server's own time zone. */
+    public String eventTimezone = "";
+    public List<Event> events = new ArrayList<>();
+    public boolean antiCheese = true;
+    public int unreachableSeconds = 4;
+    public boolean blockPlacingInArenaDuringFight = true;
+    public boolean arenaBorderParticles = true;
+    public boolean slayerBuffEnabled = true;
+    public int slayerBuffMinTier = 2;
+    public int slayerBuffSecondsPerTier = 120;
+    /** strength, luck, regeneration, speed, haste, resistance, absorption */
+    public List<String> slayerBuffs = new ArrayList<>(List.of("strength", "luck"));
+    public boolean streakEnabled = true;
+    public double streakStepPercent = 10;
+    public double streakCapPercent = 100;
+    public int streakAnnounceMin = 3;
+    public boolean dailyBonusEnabled = true;
+    public int dailyBonusShards = 50;
+
     // ---- native behaviour / arena / rescue ----
     /** true = the mob keeps its own AI (bows, thrown ice blocks, ...) and the boss adds skills on top. */
     public boolean keepNativeBehavior = true;
@@ -88,6 +169,8 @@ public final class Config {
     public double nativeMeleeRatio = 1.0;
     /** Boss projectile/ranged hit = this x a normal boss hit. */
     public double nativeProjectileRatio = 0.7;
+    /** Max walk-speed multiplier over the mob's normal speed while it uses its own AI (higher looks goofy). */
+    public double nativeSpeedCap = 1.15;
     /** Boss that ends up this many blocks below the nearest player is teleported back up. */
     public double fallRescueDepth = 6;
     /** true = bosses only spawn in the arenas below (a random one each time). */
@@ -257,12 +340,24 @@ public final class Config {
         double[] fightSec = {90, 120, 180, 240, 360, 480, 600};
         int[] cdMin = {20, 25, 30, 35, 40, 45, 60};
         int[] cdMax = {30, 35, 40, 45, 50, 55, 75};
+        int[] spMin = {100, 120, 140, 160, 180, 200, 240};
+        int[] spMax = {120, 140, 160, 180, 200, 220, 260};
+        double[] ember = {0, 0, 0, 0, 0.02, 0.04, 0.08};
+        String[] ult = {"RAVAGE,ECHO_SLAM,SUN_STRIKE", "RAVAGE,ECHO_SLAM,SUN_STRIKE",
+                "WATERFOWL,EXECUTION_MARK,RUPTURE", "WATERFOWL,EXECUTION_MARK,RUPTURE",
+                "REVERSE_POLARITY,LAGUNA_BLADE,THUNDERGOD_WRATH,FATAL_BONDS,CHRONOSPHERE,REAPER_SCYTHE",
+                "REVERSE_POLARITY,LAGUNA_BLADE,THUNDERGOD_WRATH,FATAL_BONDS,CHRONOSPHERE,REAPER_SCYTHE",
+                "REVERSE_POLARITY,LAGUNA_BLADE,THUNDERGOD_WRATH,FATAL_BONDS,CHRONOSPHERE,REAPER_SCYTHE"};
         for (int i = 0; i < tiers.size() && i < hitCap.length; i++) {
             tiers.get(i).hitCapPercent = hitCap[i];
             tiers.get(i).dpsCapPercent = dpsCap[i];
             tiers.get(i).minFightSeconds = fightSec[i];
             tiers.get(i).cooldownMinMinutes = cdMin[i];
             tiers.get(i).cooldownMaxMinutes = cdMax[i];
+            tiers.get(i).shardPlayerMin = spMin[i];
+            tiers.get(i).shardPlayerMax = spMax[i];
+            tiers.get(i).emberChance = ember[i];
+            tiers.get(i).ultimates = new ArrayList<>(Arrays.asList(ult[i].split(",")));
         }
         buildDefaultRewards();
     }
@@ -333,6 +428,12 @@ public final class Config {
             if (c.tiers.get(i).hitCapPercent <= 0) c.tiers.get(i).hitCapPercent = d.tiers.get(i).hitCapPercent;
             if (c.tiers.get(i).dpsCapPercent <= 0) c.tiers.get(i).dpsCapPercent = d.tiers.get(i).dpsCapPercent;
             if (c.tiers.get(i).minFightSeconds <= 0) c.tiers.get(i).minFightSeconds = d.tiers.get(i).minFightSeconds;
+            if (c.tiers.get(i).shardPlayerMax <= 0) {
+                c.tiers.get(i).shardPlayerMin = d.tiers.get(i).shardPlayerMin;
+                c.tiers.get(i).shardPlayerMax = d.tiers.get(i).shardPlayerMax;
+            }
+            if (c.tiers.get(i).ultimates == null || c.tiers.get(i).ultimates.isEmpty()) c.tiers.get(i).ultimates = d.tiers.get(i).ultimates;
+            if (c.tiers.get(i).disabledSkills == null) c.tiers.get(i).disabledSkills = new ArrayList<>();
             if (c.tiers.get(i).cooldownMaxMinutes <= 0) {
                 c.tiers.get(i).cooldownMinMinutes = d.tiers.get(i).cooldownMinMinutes;
                 c.tiers.get(i).cooldownMaxMinutes = d.tiers.get(i).cooldownMaxMinutes;
@@ -340,6 +441,14 @@ public final class Config {
         }
         if (c.immuneEffects == null) c.immuneEffects = d.immuneEffects;
         if (c.arenas == null) c.arenas = new ArrayList<>();
+        if (c.uniqueRewards == null) c.uniqueRewards = new ArrayList<>();
+        if (c.events == null) c.events = new ArrayList<>();
+        if (c.slayerBuffs == null) c.slayerBuffs = d.slayerBuffs;
+        if (c.disabledSkills == null) c.disabledSkills = new ArrayList<>();
+        if (c.discordWebhookUrl == null) c.discordWebhookUrl = "";
+        boolean anyEmber = false;
+        for (TierDef td : c.tiers) if (td.emberChance > 0) anyEmber = true;
+        if (!anyEmber) for (int i = 0; i < c.tiers.size() && i < d.tiers.size(); i++) c.tiers.get(i).emberChance = d.tiers.get(i).emberChance;
         if (c.noSpawnZones == null) c.noSpawnZones = d.noSpawnZones;
         if (c.affixPool == null) c.affixPool = d.affixPool;
         if (c.flyingMobs == null) c.flyingMobs = new ArrayList<>();
