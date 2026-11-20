@@ -22,6 +22,8 @@ public final class Rewards {
         return o.get();
     }
 
+    public static Item itemOrNull(String id) { return item(id); }
+
     private static void addStacks(List<ItemStack> out, Item item, int count) {
         int max = Math.max(1, new ItemStack(item, 1).getMaxStackSize());
         while (count > 0) {
@@ -59,7 +61,7 @@ public final class Rewards {
 
         int shards = 0, bonusShards = 0;
         Item shard = item(c.shardItem);
-        if (shard != null) {
+        if (shard != null && !c.shardsPerPlayer) {
             shards = Util.rint(t.shardMin, t.shardMax);
             bonusShards = Util.rint(c.topDamageShardMin, c.topDamageShardMax);
             addStacks(chest, shard, shards);
