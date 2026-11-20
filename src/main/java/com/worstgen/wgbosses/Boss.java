@@ -77,7 +77,7 @@ public final class Boss {
     private final int[] calIdx;
     private final List<List<Skill>> phaseSkills = new ArrayList<>();
     private final Map<Skill, Long> cd = new EnumMap<>(Skill.class);
-    private double dmgMult = 1, speedMult = 1, sizeBase, sizeEnd, baseMove = 0.25, curSpeed = 0.25;
+    private double dmgMult = 1, speedMult = 1, sizeBase, sizeEnd, baseMove = 0.25, curSpeed = 0.25, origBase = 0.25;
 
     private ServerPlayer target, skillTarget;
     private long targetUntil, nextSkillTick, attackCd;
@@ -111,6 +111,19 @@ public final class Boss {
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
     private int crowd;
+    private int unreachT;
+    private final Set<UUID> outside = new HashSet<>();
+    public boolean noRewards;
+    private Skill ultimate;
+    private long ultReadyAt = Long.MAX_VALUE;
+    private final Map<UUID, double[]> dbg = new HashMap<>();
+    private final Map<UUID, String> dbgWeapon = new HashMap<>();
+    private final List<UUID> bonded = new ArrayList<>();
+    private long bondUntil, chronoUntil;
+    private Vec3 chronoCenter = Vec3.ZERO;
+    private long customUntil, passCheck, lastNativeHit;
+    private int refuse;
+    private Vec3 passPos;
     public static boolean applying;
     public final boolean nativeAi;
     public final Config.Arena arena;
@@ -136,7 +149,20 @@ public final class Boss {
         this.arena = ar != null && level.dimension().identifier().toString().equals(ar.dimension) ? ar : null;
         this.hasTotem = Util.chance(c.totemChance);
         this.affixes = new ArrayList<>(s.affixes);
+        List<Skill> ults = new ArrayList<>();
+        List<String> ul = c.tiers.get(s.tier).ultimates;
+        if (ul != null) {
+            for (String un : ul) {
+                try {
+                    Skill uk = Skill.valueOf(un.trim().toUpperCase(Locale.ROOT));
+                    if (!isDisabled(uk, s.tier) && !(flyer && (uk == Skill.LEAP || uk == Skill.SMASH))) ults.add(uk);
+                } catch (Exception ignored) { }
+            }
+        }
+        this.ultimate = ults.isEmpty() ? null : Util.pick(ults);
         this.born = mgr.tick;
+        this.lastNativeHit = mgr.tick;
+        this.passCheck = mgr.tick;
         this.blinkAt = mgr.tick + 200;
         this.flyHeight = Util.rdbl(c.flyerHeightMin, Math.max(c.flyerHeightMin, c.flyerHeightMax));
         Config.TierDef t = c.tiers.get(trueTier);
@@ -161,7 +187,7 @@ public final class Boss {
         this.hp = maxHp;
 
         AttributeInstance mi = mob.getAttribute(Attributes.MOVEMENT_SPEED);
-        if (mi != null) baseMove = Math.max(0.2, mi.getBaseValue());
+        if (mi != null) { baseMove = Math.max(0.2, mi.getBaseValue()); if (mi.getBaseValue() > 0) origBase = mi.getBaseValue(); }
         if (!nativeAi) clearGoals();
         else setAttr(Attributes.FOLLOW_RANGE, 96);
         setAttr(Attributes.MAX_HEALTH, 1024);
@@ -175,7 +201,7 @@ public final class Boss {
             List<Skill> pool = new ArrayList<>();
             for (Skill sk : Skill.values()) {
                 if (sk.minTier <= pIdx && !prev.contains(sk) && !(sk == Skill.SUMMON && p < 2)
-                        && !(flyer && (sk == Skill.LEAP || sk == Skill.SMASH))) pool.add(sk);
+                        && !isDisabled(sk, s.tier) && !(flyer && (sk == Skill.LEAP || sk == Skill.SMASH))) pool.add(sk);
             }
             Collections.shuffle(pool);
             List<Skill> now = new ArrayList<>(prev);
@@ -263,6 +289,99 @@ public final class Boss {
 
     public boolean invulnerable() { return mgr.tick < invulnUntil || mgr.tick < shieldUntil; }
 
+    private static boolean isDisabled(Skill k, int tierIdx) {
+        Config c = WGBosses.config;
+        for (String n : c.disabledSkills) if (n != null && n.trim().equalsIgnoreCase(k.name())) return true;
+        if (tierIdx >= 0 && tierIdx < c.tiers.size()) {
+            List<String> l = c.tiers.get(tierIdx).disabledSkills;
+            if (l != null) for (String n : l) if (n != null && n.trim().equalsIgnoreCase(k.name())) return true;
+        }
+        return false;
+    }
+
+    /** Shard / ember bonus for rainbow and affixed bosses. */
+    public double rewardMultiplier() {
+        Config c = WGBosses.config;
+        return 1.0 + affixes.size() * c.affixRewardBonusPercent / 100.0 + (rainbow ? c.rainbowRewardBonusPercent / 100.0 : 0);
+    }
+
+    private void sp(net.minecraft.core.particles.ParticleOptions p, double x, double y, double z, int n, double dx, double dy, double dz, double speed) {
+        double sc = WGBosses.config.particleScale;
+        int cnt = sc >= 0.999 ? n : Math.max(1, (int) Math.round(n * Math.max(0.1, sc)));
+        level.sendParticles(p, x, y, z, cnt, dx, dy, dz, speed);
+    }
+
+    public List<String> debugLines() {
+        Config c = WGBosses.config;
+        Config.TierDef pt = phaseTier(phase);
+        List<String> l = new ArrayList<>();
+        l.add("== Boss #" + id + " " + baseName + " ==");
+        l.add("tier shown=" + pt.name + " true=" + c.tiers.get(trueTier).name + " calamity=" + calamity + " rainbow=" + rainbow + (rainbow ? "(" + abnormal + ")" : ""));
+        l.add("phase " + phase + "/" + phases + " hp " + Math.round(hp) + "/" + Math.round(maxHp) + " (" + Math.round(100 * hp / maxHp) + "%) healed=" + Math.round(healed));
+        l.add("skill=" + (cur == null ? "none" : cur.name()) + " ultimate=" + (ultimate == null ? "none" : ultimate.name())
+                + " enraged=" + enraged + " invulnerable=" + invulnerable() + " totem=" + hasTotem);
+        l.add("affixes=" + affixes + " mode=" + (flyer ? "flyer" : nativeAi ? (mgr.tick < customUntil ? "native(custom fallback)" : "native") : "custom")
+                + (arena != null ? " arena=" + arena.name : "") + " noRewards=" + noRewards);
+        l.add("caps: hit<=" + Math.round(maxHp * pt.hitCapPercent / 100) + " perPlayer/s<=" + Math.round(maxHp * pt.dpsCapPercent / 100)
+                + " allPlayers/s<=" + Math.round(maxHp / Math.max(1, pt.minFightSeconds)) + " (fastest kill " + Math.round(pt.minFightSeconds) + "s)");
+        l.add("age " + (mgr.tick - born) / 20 + "s, players in range " + crowd);
+        for (Map.Entry<UUID, double[]> e : dbg.entrySet()) {
+            double[] d = e.getValue();
+            ServerPlayer p = mgr.server.getPlayerList().getPlayer(e.getKey());
+            String n = p != null ? p.getName().getString() : e.getKey().toString().substring(0, 8);
+            l.add(" - " + n + ": dealt " + Math.round(d[1]) + ", raw " + Math.round(d[0]) + ", biggest hit " + Math.round(d[2]) + ", weapon " + dbgWeapon.get(e.getKey()));
+        }
+        return l;
+    }
+
+    private static boolean isRanged(Skill s) {
+        return switch (s) {
+            case SUN_STRIKE, LAGUNA_BLADE, SHULKER_BOLT, THUNDERGOD_WRATH, EXECUTION_MARK, RUPTURE, BARRAGE, LIGHTNING, FLY_POTION,
+                 SPLASH_POISON, SPLASH_WITHER, SPLASH_HARMING, SPLASH_LEVITATION, SPLASH_SLOWNESS, SPLASH_BLINDNESS -> true;
+            default -> false;
+        };
+    }
+
+    public boolean unreachable() { return unreachT >= WGBosses.config.unreachableSeconds * 20; }
+
+    /** Detects a target hiding where the boss can't path to (1x1 hole, pillar...). */
+    private void reachCheck(long now) {
+        Config c = WGBosses.config;
+        if (!c.antiCheese || flyer || target == null || cur != null || transition > 0 || now % 20 != 0) return;
+        boolean can = true;
+        try {
+            var path = mob.getNavigation().createPath(target, 1);
+            can = path != null && path.canReach();
+        } catch (Throwable ignored) { }
+        if (mob.distanceTo(target) <= 3.0) can = true;
+        if (can) unreachT = 0; else unreachT += 20;
+    }
+
+    private void arenaBorder(long now) {
+        if (arena == null || now % 10 != 0) return;
+        Set<UUID> nowOut = new HashSet<>();
+        for (ServerPlayer p : players()) {
+            double dx = p.getX() - arena.x, dz = p.getZ() - arena.z;
+            double d = Math.sqrt(dx * dx + dz * dz);
+            if (d > arena.radius + 1 && d < arena.radius + 40) {
+                nowOut.add(p.getUUID());
+                if (outside.add(p.getUUID())) {
+                    p.sendSystemMessage(Component.literal("You left the boss arena - the boss can't see you out here!").withStyle(ChatFormatting.RED));
+                }
+            }
+            if (WGBosses.config.arenaBorderParticles && Math.abs(d - arena.radius) < 10 && d > 0.1) {
+                double ang = Math.atan2(dz, dx);
+                for (int i = -3; i <= 3; i++) {
+                    double a = ang + i * 0.08;
+                    for (int h = 0; h < 4; h++) {
+                        sp(ParticleTypes.ELECTRIC_SPARK, arena.x + Math.cos(a) * arena.radius, p.getY() + h, arena.z + Math.sin(a) * arena.radius, 1, 0, 0, 0, 0);
+                    }
+                }
+            }
+        }
+        outside.retainAll(nowOut);
+    }
+
     private double crowdMul() {
         Config c = WGBosses.config;
         double extra = Math.min(c.damageScaleCapPercent, Math.max(0, crowd - c.minPlayers) * c.damagePerExtraPlayerPercent);
@@ -341,7 +460,7 @@ public final class Boss {
             blinkAt = now + Util.rint(240, 400);
             Vec3 d = Util.findSafe(level, target.getX(), target.getY(), target.getZ(), 4, 7);
             if (d != null) {
-                level.sendParticles(ParticleTypes.PORTAL, mob.getX(), mob.getY() + mob.getBbHeight() * 0.5, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
+                sp(ParticleTypes.PORTAL, mob.getX(), mob.getY() + mob.getBbHeight() * 0.5, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
                 mob.setPos(d.x, d.y, d.z);
                 Util.sound(level, d.x, d.y, d.z, SoundEvents.ENDERMAN_TELEPORT, 2f, 1f);
             }
@@ -397,7 +516,7 @@ public final class Boss {
                 if (!c.flightLethal && p.getHealth() > 1f) dmg = Math.min(dmg, p.getHealth() - 1f);
                 applying = true;
                 try { p.hurtServer(level, level.damageSources().indirectMagic(mob, mob), (float) dmg); } finally { applying = false; }
-                level.sendParticles(ParticleTypes.CRIT, p.getX(), p.getY() + 1, p.getZ(), 12, 0.4, 0.6, 0.4, 0.1);
+                sp(ParticleTypes.CRIT, p.getX(), p.getY() + 1, p.getZ(), 12, 0.4, 0.6, 0.4, 0.1);
             }
         }
         flight.keySet().retainAll(seen);
@@ -432,7 +551,7 @@ public final class Boss {
         Vec3 pos = p.position();
         if (ruptureLast != null) ruptureAcc += Math.min(8, Util.flat(pos.x, pos.z, ruptureLast.x, ruptureLast.z));
         ruptureLast = pos;
-        if (now % 4 == 0) level.sendParticles(ParticleTypes.DAMAGE_INDICATOR, p.getX(), p.getY() + 1, p.getZ(), 3, 0.3, 0.5, 0.3, 0);
+        if (now % 4 == 0) sp(ParticleTypes.DAMAGE_INDICATOR, p.getX(), p.getY() + 1, p.getZ(), 3, 0.3, 0.5, 0.3, 0);
         if (now % 10 == 0) {
             if (ruptureAcc > 0.6) hurt(p, curDamage() * 0.1 * Math.min(12, ruptureAcc));
             ruptureAcc = 0;
@@ -497,7 +616,7 @@ public final class Boss {
                 double ang = now * 0.25, r = mob.getBbWidth() * 0.6 + 0.8;
                 for (int i = 0; i < 3; i++) {
                     double a = ang + i * 2.09;
-                    level.sendParticles(ParticleTypes.ELECTRIC_SPARK, mob.getX() + Math.cos(a) * r,
+                    sp(ParticleTypes.ELECTRIC_SPARK, mob.getX() + Math.cos(a) * r,
                             mob.getY() + mob.getBbHeight() * (0.2 + 0.3 * i), mob.getZ() + Math.sin(a) * r, 1, 0, 0, 0, 0);
                 }
                 if (now % 20 == 0) Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.BEACON_AMBIENT, 1.5f, 1.4f);
@@ -517,6 +636,34 @@ public final class Boss {
         }
         tickBolts();
         tickRupture(now);
+        arenaBorder(now);
+        if (now < bondUntil) {
+            if (now % 4 == 0) {
+                List<ServerPlayer> bl = new ArrayList<>();
+                for (UUID bu : bonded) {
+                    ServerPlayer bp = mgr.server.getPlayerList().getPlayer(bu);
+                    if (valid(bp)) bl.add(bp);
+                }
+                for (int i = 0; i < bl.size(); i++) {
+                    for (int j = i + 1; j < bl.size(); j++) {
+                        line(bl.get(i).position().add(0, 1, 0), bl.get(j).position().add(0, 1, 0), ParticleTypes.SOUL_FIRE_FLAME);
+                    }
+                }
+            }
+        } else if (bondUntil > 0) { bondUntil = 0; bonded.clear(); }
+        if (now < chronoUntil) {
+            if (now % 5 == 0) {
+                for (double hh = 0; hh <= 6; hh += 1.5) ring(ParticleTypes.END_ROD, chronoCenter.x, chronoCenter.y + hh, chronoCenter.z, 12, 28);
+            }
+            if (now % 10 == 0) {
+                mob.addEffect(new MobEffectInstance(MobEffects.SPEED, 25, 2, false, false));
+                for (ServerPlayer cp : players()) {
+                    if (Util.flat(cp.getX(), cp.getZ(), chronoCenter.x, chronoCenter.z) <= 12 && Math.abs(cp.getY() - chronoCenter.y) < 8) {
+                        cp.addEffect(new MobEffectInstance(MobEffects.SLOWNESS, 30, 3, false, true));
+                    }
+                }
+            }
+        }
         if (!enraged && cfg.enrageEnabled && now - born >= cfg.enrageMinutes * 1200L) enrage();
         if (enraged && now % 10 == 0) puff(ParticleTypes.ANGRY_VILLAGER, 4);
         affixTick(now);
@@ -540,13 +687,13 @@ public final class Boss {
                 hurt(bt.tgt, curDamage() * 0.4);
                 int lo = cfg.shulkerLevitationMinSeconds, hi = Math.max(lo, cfg.shulkerLevitationMaxSeconds);
                 bt.tgt.addEffect(new MobEffectInstance(MobEffects.LEVITATION, Util.rint(lo, hi) * 20, 0));
-                level.sendParticles(ParticleTypes.END_ROD, aim.x, aim.y, aim.z, 20, 0.4, 0.4, 0.4, 0.05);
+                sp(ParticleTypes.END_ROD, aim.x, aim.y, aim.z, 20, 0.4, 0.4, 0.4, 0.05);
                 Util.sound(level, aim.x, aim.y, aim.z, SoundEvents.SHULKER_BULLET_HIT, 1.5f, 1f);
                 it.remove();
                 continue;
             }
             bt.pos = bt.pos.add(diff.normalize().scale(0.45));
-            level.sendParticles(ParticleTypes.END_ROD, bt.pos.x, bt.pos.y, bt.pos.z, 2, 0.05, 0.05, 0.05, 0);
+            sp(ParticleTypes.END_ROD, bt.pos.x, bt.pos.y, bt.pos.z, 2, 0.05, 0.05, 0.05, 0);
         }
     }
 
@@ -601,7 +748,13 @@ public final class Boss {
         setAttr(Attributes.KNOCKBACK_RESISTANCE, Math.min(0.9, 0.2 + size * 0.07));
         setAttr(Attributes.STEP_HEIGHT, 0.6 + size * 0.35);
         curSpeed = baseMove * pt.speedMult * (1 + 0.07 * (p - 1)) * speedMult;
-        setAttr(Attributes.MOVEMENT_SPEED, curSpeed * (nativeAi && enraged ? WGBosses.config.enrageSpeedMult : 1.0));
+        if (nativeAi) {
+            // keep the mob's own walk speed (+ a small tier bonus) so its run animation still looks right
+            double nm = Math.min(WGBosses.config.nativeSpeedCap, pt.speedMult * (1 + 0.07 * (p - 1)) * speedMult);
+            setAttr(Attributes.MOVEMENT_SPEED, origBase * nm * (enraged ? WGBosses.config.enrageSpeedMult : 1.0));
+        } else {
+            setAttr(Attributes.MOVEMENT_SPEED, curSpeed);
+        }
     }
 
     public ChatFormatting chatColor() { return CHAT[Math.min(CHAT.length - 1, displayTierIdx())]; }
@@ -694,22 +847,34 @@ public final class Boss {
         DamageSource src = WGBosses.config.armorBypass ? level.damageSources().indirectMagic(mob, mob) : level.damageSources().mobAttack(mob);
         applying = true;
         try { p.hurtServer(level, src, (float) finalDmg); } finally { applying = false; }
+        if (mgr.tick < bondUntil && bonded.contains(p.getUUID())) {
+            double shared = finalDmg * 0.5;
+            for (UUID bu : bonded) {
+                if (bu.equals(p.getUUID())) continue;
+                ServerPlayer o = mgr.server.getPlayerList().getPlayer(bu);
+                if (!valid(o)) continue;
+                double part = Math.min(shared, Math.max(0, o.getHealth() - 1f));
+                if (part < 0.5) continue;
+                applying = true;
+                try { o.hurtServer(level, src, (float) part); } finally { applying = false; }
+            }
+        }
         if (affixes.contains("VAMPIRIC")) heal(maxHp * 0.005);
         if (mgr.tick < drainUntil) {
             heal(maxHp * WGBosses.config.lifeDrainHealPercent / 100.0);
-            level.sendParticles(ParticleTypes.HEART, mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(), 2, 0.3, 0.3, 0.3, 0.02);
+            sp(ParticleTypes.HEART, mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(), 2, 0.3, 0.3, 0.3, 0.02);
         }
     }
 
     private void puff(ParticleOptions p, int n) {
         double w = mob.getBbWidth();
-        level.sendParticles(p, mob.getX(), mob.getY() + 0.1, mob.getZ(), n, w * 0.4, 0.1, w * 0.4, 0.02);
+        sp(p, mob.getX(), mob.getY() + 0.1, mob.getZ(), n, w * 0.4, 0.1, w * 0.4, 0.02);
     }
 
     private void ring(ParticleOptions p, double cx, double cy, double cz, double r, int n) {
         for (int i = 0; i < n; i++) {
             double a = Math.PI * 2 * i / n;
-            level.sendParticles(p, cx + Math.cos(a) * r, cy + 0.15, cz + Math.sin(a) * r, 1, 0, 0, 0, 0);
+            sp(p, cx + Math.cos(a) * r, cy + 0.15, cz + Math.sin(a) * r, 1, 0, 0, 0, 0);
         }
     }
 
@@ -768,6 +933,12 @@ public final class Boss {
         hp -= amt;
         if (attacker != null) {
             damage.merge(attacker.getUUID(), eff, Double::sum);
+            double[] dd = dbg.computeIfAbsent(attacker.getUUID(), k -> new double[3]);
+            dd[0] += amount;
+            dd[1] += eff;
+            dd[2] = Math.max(dd[2], amt);
+            net.minecraft.world.item.ItemStack hs = attacker.getMainHandItem();
+            dbgWeapon.put(attacker.getUUID(), hs.getHoverName().getString() + " (" + BuiltInRegistries.ITEM.getKey(hs.getItem()) + ")");
             resetDespawn(mgr.tick);
             if (Util.chance(0.12)) mgr.say(this, "hit", attacker, false);
         }
@@ -823,7 +994,7 @@ public final class Boss {
         mob.setCustomName(displayName());
         refreshBar();
         double cy = mob.getY() + mob.getBbHeight() * 0.5;
-        level.sendParticles(ParticleTypes.TOTEM_OF_UNDYING, mob.getX(), cy, mob.getZ(), 120, 1.5, 1.5, 1.5, 0.4);
+        sp(ParticleTypes.TOTEM_OF_UNDYING, mob.getX(), cy, mob.getZ(), 120, 1.5, 1.5, 1.5, 0.4);
         Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.TOTEM_USE, 3f, 0.8f);
         for (ServerPlayer p : players()) {
             if (p.distanceToSqr(mob) < 144) Util.push(p, mob.getX(), mob.getZ(), 1.0, 0.4);
@@ -876,8 +1047,9 @@ public final class Boss {
         toughness(now);
         buffs(now);
         if (nativeAi) {
-            boolean fr = cur != null || transition > 0 || now < stunUntil;
+            boolean fr = cur != null || transition > 0 || now < stunUntil || now < customUntil;
             if (mob.isNoAi() != fr) mob.setNoAi(fr);
+            if (cur != null || transition > 0 || now < customUntil) { passCheck = now; passPos = mob.position(); }
         }
         mob.setAirSupply(mob.getMaxAirSupply());
         safety(now);
@@ -893,6 +1065,7 @@ public final class Boss {
         crowd = ps.size();
         wound(ps);
         flightNerf(ps);
+        reachCheck(now);
         tickMinions(ps);
         if (ps.isEmpty()) { target = null; if (cur != null) endSkill(now); return; }
         validateTarget(ps, now);
@@ -925,7 +1098,7 @@ public final class Boss {
             if (target != null && cur == null && transition <= 0) {
                 double moved = mob.position().distanceTo(lastPos);
                 double d = Util.flat(mob.getX(), mob.getZ(), target.getX(), target.getZ());
-                double need = nativeAi ? 28 : mob.getBbWidth() * 0.5 + 4;
+                double need = nativeAi && mgr.tick >= customUntil ? 28 : mob.getBbWidth() * 0.5 + 4;
                 if (moved < 0.4 && d > need) stuck++; else stuck = 0;
                 if (stuck >= 2) {
                     // teleport on top of solid ground near the target
@@ -990,7 +1163,7 @@ public final class Boss {
 
     private void move() {
         if (target == null) return;
-        if (nativeAi && !frozen() && mgr.tick >= stunUntil) { moveNative(); return; }
+        if (nativeAi && !frozen() && mgr.tick >= stunUntil && mgr.tick >= customUntil) { moveNative(); return; }
         face(target);
         Vec3 dm = mob.getDeltaMovement();
         if (mgr.tick < stunUntil) { mob.setDeltaMovement(0, flyer ? 0 : dm.y, 0); return; }
@@ -1030,7 +1203,18 @@ public final class Boss {
     }
 
     private void moveNative() {
+        long now = mgr.tick;
+        if (mob.getTarget() == null) refuse++; else refuse = 0;
         mob.setTarget(target);
+        // Neutral / brain mobs may refuse to attack: after a short while, fall back to the boss's own attacks for a while.
+        double dist3 = mob.distanceTo(target);
+        if (refuse >= 20 && dist3 < 48) { customUntil = now + 300; refuse = 0; return; }
+        if (now - passCheck >= 80) {
+            double moved = passPos == null ? 99 : Util.flat(mob.getX(), mob.getZ(), passPos.x, passPos.z);
+            if (now - lastNativeHit > 80 && moved < 1.5 && dist3 < 32) { customUntil = now + 300; return; }
+            passPos = mob.position();
+            passCheck = now;
+        }
         double dx = target.getX() - mob.getX(), dz = target.getZ() - mob.getZ();
         double d = Math.sqrt(dx * dx + dz * dz);
         if (dashLeft > 0) {
@@ -1054,6 +1238,7 @@ public final class Boss {
     /** The mob's own attack (arrow, thrown block, bite...) landed: replace its damage with the boss damage. */
     public boolean convertHit(ServerPlayer p, DamageSource src) {
         if (dying || gone) return false;
+        lastNativeHit = mgr.tick;
         Config c = WGBosses.config;
         boolean proj = src.getDirectEntity() != null && src.getDirectEntity() != mob;
         hurt(p, curDamage() * (proj ? c.nativeProjectileRatio : c.nativeMeleeRatio));
@@ -1077,11 +1262,11 @@ public final class Boss {
 
     private void teleportBoss(Vec3 d) {
         double h = mob.getBbHeight() * 0.5;
-        level.sendParticles(ParticleTypes.PORTAL, mob.getX(), mob.getY() + h, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
+        sp(ParticleTypes.PORTAL, mob.getX(), mob.getY() + h, mob.getZ(), 40, 0.5, 0.8, 0.5, 0.3);
         mob.setPos(d.x, d.y, d.z);
         mob.setDeltaMovement(Vec3.ZERO);
         mob.getNavigation().stop();
-        level.sendParticles(ParticleTypes.PORTAL, d.x, d.y + h, d.z, 40, 0.5, 0.8, 0.5, 0.3);
+        sp(ParticleTypes.PORTAL, d.x, d.y + h, d.z, 40, 0.5, 0.8, 0.5, 0.3);
         Util.sound(level, d.x, d.y, d.z, SoundEvents.ENDERMAN_TELEPORT, 2f, 0.8f);
         lastPos = mob.position();
         stuck = 0;
@@ -1180,6 +1365,8 @@ public final class Boss {
             case SPLASH_POISON, SPLASH_WITHER, SPLASH_HARMING, SPLASH_LEVITATION, SPLASH_SLOWNESS, SPLASH_BLINDNESS -> d <= 40;
             case WATERFOWL -> d <= 30;
             case POWER_UP -> mgr.tick >= powerUntil;
+            case FATAL_BONDS -> now >= bondUntil && ps.size() >= 2;
+            case CHRONOSPHERE -> now >= chronoUntil;
             case LIFE_DRAIN -> mgr.tick >= drainUntil && healable();
             case EXECUTION_MARK -> d <= 48;
             case REVERSE_POLARITY -> d <= 32;
@@ -1192,6 +1379,14 @@ public final class Boss {
 
     private void maybeStartSkill(long now, List<ServerPlayer> ps) {
         if (now < nextSkillTick) return;
+        if (ultimate != null && phase == phases) {
+            if (ultReadyAt == Long.MAX_VALUE) ultReadyAt = now + 200;
+            if (now >= ultReadyAt && !invulnerable() && canUse(ultimate, now, ps)) {
+                ultReadyAt = now + 1800;
+                startSkill(ultimate, now, ps, true);
+                return;
+            }
+        }
         List<Skill> avail = new ArrayList<>();
         for (Skill s : phaseSkills.get(phase - 1)) if (canUse(s, now, ps)) avail.add(s);
         if (target != null && airborne(target)) {
@@ -1204,9 +1399,22 @@ public final class Boss {
             }
             if (!air.isEmpty()) avail = air;
         }
+        if (unreachable()) {
+            if (unreachT >= 160 && !invulnerable() && canUse(Skill.REVERSE_POLARITY, now, ps)) {
+                unreachT = 0;
+                startSkill(Skill.REVERSE_POLARITY, now, ps, false);
+                return;
+            }
+            List<Skill> rg = new ArrayList<>();
+            for (Skill rs : avail) if (isRanged(rs)) rg.add(rs);
+            if (!rg.isEmpty()) avail = rg;
+        }
         if (invulnerable()) avail.removeIf(sk -> !(sk == Skill.DASH || sk == Skill.TELEPORT || sk == Skill.LEAP));
         if (avail.isEmpty()) { nextSkillTick = now + 40; return; }
-        Skill s = Util.pick(avail);
+        startSkill(Util.pick(avail), now, ps, false);
+    }
+
+    private void startSkill(Skill s, long now, List<ServerPlayer> ps, boolean ult) {
         cur = s;
         skillT = 0;
         Config hc = WGBosses.config;
@@ -1221,6 +1429,12 @@ public final class Boss {
             case TELEPORT, DECOY_SWAP -> Util.pick(ps);
             default -> target;
         };
+        if (ult) {
+            for (ServerPlayer p : ps) {
+                Util.title(p, Component.literal("ULTIMATE").withStyle(ChatFormatting.DARK_RED, ChatFormatting.BOLD),
+                        Component.literal(s.label).withStyle(ChatFormatting.GOLD), 5, 40, 10);
+            }
+        }
         if (Util.chance(0.2)) mgr.say(this, "skill", skillTarget, false);
     }
 
@@ -1235,6 +1449,7 @@ public final class Boss {
         endSkillNow();
         int wait = Util.rint(70, 140 - Math.min(50, (phase - 1) * 12));
         if (target != null && airborne(target)) wait /= 2;
+        if (unreachable()) wait /= 2;
         nextSkillTick = now + wait;
     }
 
@@ -1251,7 +1466,7 @@ public final class Boss {
         Vec3 step = diff.scale(1.0 / len);
         for (double s = 0; s <= len && s < 60; s += 1.0) {
             Vec3 q = from.add(step.scale(s));
-            level.sendParticles(p, q.x, q.y, q.z, 1, 0, 0, 0, 0);
+            sp(p, q.x, q.y, q.z, 1, 0, 0, 0, 0);
         }
     }
 
@@ -1427,7 +1642,7 @@ public final class Boss {
                 }
                 if (skillT > 15 && skillT <= 115) {
                     heal(maxHp * cfg.heartHoverPercent / 100.0 / 100.0);
-                    if (skillT % 5 == 0) level.sendParticles(ParticleTypes.HEART, x, y + mob.getBbHeight() * 0.8, z, 6, size * 0.4, 0.4, size * 0.4, 0.02);
+                    if (skillT % 5 == 0) sp(ParticleTypes.HEART, x, y + mob.getBbHeight() * 0.8, z, 6, size * 0.4, 0.4, size * 0.4, 0.02);
                 } else if (skillT > 115) endSkill(now);
             }
             case INVIS_SPLASH -> {
@@ -1445,7 +1660,7 @@ public final class Boss {
             }
             case DECOY_SWAP -> {
                 if (skillT < 15) {
-                    level.sendParticles(ParticleTypes.PORTAL, t.getX(), t.getY() + 1, t.getZ(), 8, 0.4, 0.8, 0.4, 0.3);
+                    sp(ParticleTypes.PORTAL, t.getX(), t.getY() + 1, t.getZ(), 8, 0.4, 0.8, 0.4, 0.3);
                     puff(ParticleTypes.PORTAL, 8);
                 } else if (skillT == 15) {
                     Vec3 pp = t.position(), bp = mob.position();
@@ -1477,7 +1692,7 @@ public final class Boss {
                     puff(ParticleTypes.CLOUD, 6);
                 } else if (skillT == 46) {
                     heal(maxHp * cfg.retreatHealPercent / 100.0);
-                    level.sendParticles(ParticleTypes.HEART, x, y + mob.getBbHeight() * 0.8, z, 25, size * 0.5, 0.6, size * 0.5, 0.02);
+                    sp(ParticleTypes.HEART, x, y + mob.getBbHeight() * 0.8, z, 25, size * 0.5, 0.6, size * 0.5, 0.02);
                     Util.sound(level, x, y, z, SoundEvents.BEACON_POWER_SELECT, 2f, 1.2f);
                 } else if (skillT >= 60) endSkill(now);
             }
@@ -1512,7 +1727,7 @@ public final class Boss {
                 } else {
                     for (Vec3 s : strikes) {
                         ring(ParticleTypes.CLOUD, s.x, s.y, s.z, 3.0, 24);
-                        level.sendParticles(ParticleTypes.WITCH, s.x, s.y + 0.5, s.z, 30, 1.5, 0.5, 1.5, 0.05);
+                        sp(ParticleTypes.WITCH, s.x, s.y + 0.5, s.z, 30, 1.5, 0.5, 1.5, 0.05);
                         Util.sound(level, s.x, s.y, s.z, SoundEvents.SPLASH_POTION_BREAK, 2f, 1f);
                         for (ServerPlayer p : ps) if (p.position().distanceTo(s) <= 3.5) splashHit(cur, p);
                     }
@@ -1601,7 +1816,7 @@ public final class Boss {
                 } else if (skillT == 60) {
                     if (!strikes.isEmpty()) {
                         Vec3 s = strikes.get(0);
-                        for (double yy = 0; yy < 12; yy += 0.7) level.sendParticles(ParticleTypes.ELECTRIC_SPARK, s.x, s.y + yy, s.z, 3, 0.4, 0, 0.4, 0.02);
+                        for (double yy = 0; yy < 12; yy += 0.7) sp(ParticleTypes.ELECTRIC_SPARK, s.x, s.y + yy, s.z, 3, 0.4, 0, 0.4, 0.02);
                         ring(ParticleTypes.EXPLOSION, s.x, s.y, s.z, 3.5, 12);
                         Util.sound(level, s.x, s.y, s.z, SoundEvents.LIGHTNING_BOLT_THUNDER, 3f, 1.2f);
                         for (ServerPlayer p : ps) {
@@ -1677,13 +1892,13 @@ public final class Boss {
                 if (skillT < 50) {
                     if (skillT % 3 == 0) for (Vec3 s : strikes) {
                         ring(ParticleTypes.FLAME, s.x, s.y, s.z, 2.5, 16);
-                        level.sendParticles(ParticleTypes.END_ROD, s.x, s.y + 0.3, s.z, 2, 0.3, 0.1, 0.3, 0.01);
+                        sp(ParticleTypes.END_ROD, s.x, s.y + 0.3, s.z, 2, 0.3, 0.1, 0.3, 0.01);
                     }
                 } else {
                     for (Vec3 s : strikes) {
                         List<ServerPlayer> in = new ArrayList<>();
                         for (ServerPlayer p : ps) if (Util.flat(p.getX(), p.getZ(), s.x, s.z) <= 2.8 && Math.abs(p.getY() - s.y) < 4) in.add(p);
-                        for (double yy = 0; yy < 14; yy += 0.7) level.sendParticles(ParticleTypes.END_ROD, s.x, s.y + yy, s.z, 2, 0.4, 0, 0.4, 0);
+                        for (double yy = 0; yy < 14; yy += 0.7) sp(ParticleTypes.END_ROD, s.x, s.y + yy, s.z, 2, 0.4, 0, 0.4, 0);
                         ring(ParticleTypes.FLAME, s.x, s.y, s.z, 2.5, 20);
                         Util.sound(level, s.x, s.y, s.z, SoundEvents.LIGHTNING_BOLT_THUNDER, 1.5f, 1.8f);
                         if (!in.isEmpty()) {
@@ -1763,6 +1978,69 @@ public final class Boss {
                     endSkill(now);
                 }
             }
+            case THUNDERGOD_WRATH -> {
+                if (skillT == 1) {
+                    announce("THUNDERGOD'S WRATH - leave the marked spots!", ChatFormatting.YELLOW);
+                    Util.sound(level, x, y, z, SoundEvents.LIGHTNING_BOLT_THUNDER, 4f, 0.6f);
+                }
+                if (skillT == 20) {
+                    strikes.clear();
+                    for (ServerPlayer p : ps) strikes.add(p.position());
+                }
+                if (skillT >= 20 && skillT < 45) {
+                    if (skillT % 4 == 0) for (Vec3 s : strikes) ring(ParticleTypes.ELECTRIC_SPARK, s.x, s.y, s.z, 2.0, 14);
+                } else if (skillT == 45) {
+                    for (Vec3 s : strikes) {
+                        for (double yy = 0; yy < 16; yy += 0.8) sp(ParticleTypes.ELECTRIC_SPARK, s.x, s.y + yy, s.z, 2, 0.2, 0, 0.2, 0.02);
+                        ring(ParticleTypes.CRIT, s.x, s.y, s.z, 2.5, 20);
+                        Util.sound(level, s.x, s.y, s.z, SoundEvents.LIGHTNING_BOLT_THUNDER, 2f, 1.2f);
+                        for (ServerPlayer p : ps) {
+                            if (Util.flat(p.getX(), p.getZ(), s.x, s.z) <= 2.5 && Math.abs(p.getY() - s.y) < 4) hurt(p, dmg * 1.6);
+                        }
+                    }
+                } else if (skillT > 50) endSkill(now);
+            }
+            case FATAL_BONDS -> {
+                if (skillT < 25) ring(ParticleTypes.SOUL_FIRE_FLAME, x, y + mob.getBbHeight() * 0.5, z, 1.5 + size * 0.4, 10);
+                else {
+                    bonded.clear();
+                    List<ServerPlayer> sh = new ArrayList<>(ps);
+                    Collections.shuffle(sh);
+                    int n = Math.min(sh.size(), Util.rint(2, 4));
+                    for (int i = 0; i < n; i++) bonded.add(sh.get(i).getUUID());
+                    bondUntil = now + 160;
+                    announce("Fatal Bonds - linked players share the pain!", ChatFormatting.DARK_AQUA);
+                    Util.sound(level, x, y, z, SoundEvents.ENDER_DRAGON_GROWL, 2f, 1.5f);
+                    endSkill(now);
+                }
+            }
+            case CHRONOSPHERE -> {
+                if (skillT < 25) ring(ParticleTypes.PORTAL, x, y + 0.5, z, 12 - skillT * 0.3, 24);
+                else {
+                    chronoCenter = new Vec3(x, y, z);
+                    chronoUntil = now + 120;
+                    announce("Chronosphere - get out of the dome!", ChatFormatting.LIGHT_PURPLE);
+                    Util.sound(level, x, y, z, SoundEvents.BEACON_POWER_SELECT, 3f, 0.5f);
+                    endSkill(now);
+                }
+            }
+            case REAPER_SCYTHE -> {
+                if (skillT == 1) {
+                    Util.title(t, Component.literal("REAPER'S SCYTHE").withStyle(ChatFormatting.DARK_PURPLE, ChatFormatting.BOLD),
+                            Component.literal("It feeds on your wounds...").withStyle(ChatFormatting.GRAY), 5, 40, 10);
+                    announce(t.getName().getString() + " is marked by the Reaper!", ChatFormatting.DARK_PURPLE);
+                }
+                if (skillT < 30) sp(ParticleTypes.SOUL, t.getX(), t.getY() + 1, t.getZ(), 4, 0.4, 0.8, 0.4, 0.02);
+                else if (skillT == 30) {
+                    t.addEffect(new MobEffectInstance(MobEffects.SLOWNESS, 25, 6));
+                    Util.sound(level, t.getX(), t.getY(), t.getZ(), SoundEvents.WITHER_AMBIENT, 2f, 0.6f);
+                } else if (skillT == 50) {
+                    double missing = Math.max(0, 1 - t.getHealth() / t.getMaxHealth());
+                    hurt(t, dmg * (1.0 + 3.0 * missing));
+                    ring(ParticleTypes.SOUL_FIRE_FLAME, t.getX(), t.getY(), t.getZ(), 2, 24);
+                    Util.sound(level, t.getX(), t.getY(), t.getZ(), SoundEvents.LIGHTNING_BOLT_THUNDER, 2f, 0.8f);
+                } else if (skillT > 54) endSkill(now);
+            }
             case FLY_POTION -> {
                 mob.setNoGravity(true);
                 mob.setDeltaMovement(Vec3.ZERO);
@@ -1837,7 +2115,7 @@ public final class Boss {
                 level.addFreshEntity(m);
                 minions.add(m);
                 mgr.minionOwner.put(m.getUUID(), this);
-                level.sendParticles(ParticleTypes.POOF, p.x, p.y + 0.5, p.z, 12, 0.3, 0.3, 0.3, 0.05);
+                sp(ParticleTypes.POOF, p.x, p.y + 0.5, p.z, 12, 0.3, 0.3, 0.3, 0.05);
             } catch (Throwable t) {
                 WGBosses.LOG.warn("Could not spawn minion of {}", type, t);
                 return;
