@@ -32,6 +32,8 @@ import net.minecraft.world.entity.ai.control.FlyingMoveControl;
 import net.minecraft.world.entity.ai.goal.GoalSelector;
 import net.minecraft.world.entity.ai.navigation.FlyingPathNavigation;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.entity.monster.Enemy;
+import net.minecraft.world.entity.monster.RangedAttackMob;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.Scoreboard;
@@ -111,6 +113,9 @@ public final class Boss {
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
     private int crowd;
+    private final boolean hybrid;
+    private int fallbacks;
+    private final Map<UUID, double[]> healWin = new HashMap<>();
     private int unreachT;
     private final Set<UUID> outside = new HashSet<>();
     public boolean noRewards;
@@ -145,10 +150,12 @@ public final class Boss {
         this.abnormal = s.abnormal; this.personality = s.personality; this.baseName = name;
         this.flyer = detectFlyer(mob);
         this.nativeAi = c.keepNativeBehavior && !flyer;
+        this.hybrid = this.nativeAi && !(mob instanceof Enemy);
         Config.Arena ar = c.arenaEnabled ? c.arenaByName(s.arena) : null;
         this.arena = ar != null && level.dimension().identifier().toString().equals(ar.dimension) ? ar : null;
         this.hasTotem = Util.chance(c.totemChance);
         this.affixes = new ArrayList<>(s.affixes);
+        if (hybrid && mob.getAttribute(Attributes.ATTACK_DAMAGE) == null && !(mob instanceof RangedAttackMob)) customUntil = Long.MAX_VALUE;
         List<Skill> ults = new ArrayList<>();
         List<String> ul = c.tiers.get(s.tier).ultimates;
         if (ul != null) {
@@ -264,7 +271,9 @@ public final class Boss {
         Config c = WGBosses.config;
         if (!nativeAi && mob.isNoAi()) mob.setNoAi(false);
         clearEffects(mob);
-        if (mob.isOnFire()) {
+        if (!c.showBossFire) {
+            if (mob.isOnFire()) mob.clearFire();
+        } else if (mob.isOnFire()) {
             fireT++;
             if (c.maxBurnSeconds <= 0 || fireT > c.maxBurnSeconds * 20) { mob.clearFire(); fireT = 0; }
         } else fireT = 0;
@@ -467,11 +476,11 @@ public final class Boss {
         }
     }
 
-    /** Players heal less while fighting the boss (catches lifesteal, regen, potions). */
+    /** Players heal much less while fighting the boss (catches lifesteal, regen, potions). */
     private void wound(List<ServerPlayer> ps) {
         Config c = WGBosses.config;
-        if (!c.woundEnabled) { hpSeen.clear(); return; }
-        double red = (enraged ? c.woundEnragedReducePercent : c.woundReducePercent) / 100.0;
+        if (!c.woundEnabled) { hpSeen.clear(); healWin.clear(); return; }
+        double red = (enraged ? c.woundEnragedHealReducePercent : c.woundHealReducePercent) / 100.0;
         Set<UUID> seen = new HashSet<>();
         for (ServerPlayer p : ps) {
             UUID u = p.getUUID();
@@ -479,12 +488,19 @@ public final class Boss {
             float h = p.getHealth();
             Float last = hpSeen.get(u);
             if (last != null && last > 0 && p.isAlive() && p.tickCount > 100 && h > last) {
-                h = (float) (last + (h - last) * (1 - red));
+                double gain = (h - last) * (1 - red);
+                double[] w = healWin.computeIfAbsent(u, k -> new double[]{mgr.tick, 0});
+                if (mgr.tick - w[0] >= 20) { w[0] = mgr.tick; w[1] = 0; }
+                double cap = p.getMaxHealth() * c.woundHealCapPercentPerSecond / 100.0;
+                gain = Math.min(gain, Math.max(0, cap - w[1]));
+                w[1] += gain;
+                h = (float) (last + gain);
                 p.setHealth(h);
             }
             hpSeen.put(u, h);
         }
         hpSeen.keySet().retainAll(seen);
+        healWin.keySet().retainAll(seen);
     }
 
     /** Players who stay airborne too long take escalating damage. */
@@ -1208,15 +1224,27 @@ public final class Boss {
         mob.setTarget(target);
         // Neutral / brain mobs may refuse to attack: after a short while, fall back to the boss's own attacks for a while.
         double dist3 = mob.distanceTo(target);
-        if (refuse >= 20 && dist3 < 48) { customUntil = now + 300; refuse = 0; return; }
+        if (!hybrid && refuse >= 60 && dist3 < 48) { customUntil = now + 300; refuse = 0; return; }
         if (now - passCheck >= 80) {
             double moved = passPos == null ? 99 : Util.flat(mob.getX(), mob.getZ(), passPos.x, passPos.z);
-            if (now - lastNativeHit > 80 && moved < 1.5 && dist3 < 32) { customUntil = now + 300; return; }
+            if (now - lastNativeHit > 80 && moved < 1.5 && dist3 < 32) {
+                fallbacks++;
+                customUntil = hybrid && fallbacks >= 2 ? Long.MAX_VALUE : now + 300;
+                return;
+            }
             passPos = mob.position();
             passCheck = now;
         }
         double dx = target.getX() - mob.getX(), dz = target.getZ() - mob.getZ();
         double d = Math.sqrt(dx * dx + dz * dz);
+        if (hybrid && d > 9) {
+            // non-hostile mobs don't chase on their own: walk toward the player, their own AI attacks once in range
+            face(target);
+            double hs = Math.min(0.35, Math.max(0.12, origBase * 1.1)) * (enraged ? WGBosses.config.enrageSpeedMult : 1.0);
+            double hvy = mob.getDeltaMovement().y;
+            if (mob.horizontalCollision && mob.onGround()) hvy = 0.42;
+            mob.setDeltaMovement(dx / d * hs, hvy, dz / d * hs);
+        }
         if (dashLeft > 0) {
             dashLeft--;
             if (d > 1.5) {
