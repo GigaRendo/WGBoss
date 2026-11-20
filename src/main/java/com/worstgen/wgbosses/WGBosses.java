@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +36,7 @@ public class WGBosses implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, ctx, env) -> Cmd.register(dispatcher, ctx));
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(MANAGER::allowDamage);
         ServerLivingEntityEvents.AFTER_DEATH.register(MANAGER::afterDeath);
+        UseBlockCallback.EVENT.register((player, world, hand, hit) -> MANAGER.onUseBlock(player, hand));
         ServerEntityEvents.ENTITY_LOAD.register((entity, level) -> MANAGER.entityLoaded(entity));
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> stats.seen(handler.getPlayer()));
         PlaceholderCompat.tryRegister();
