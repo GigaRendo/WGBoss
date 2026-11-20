@@ -35,7 +35,11 @@ public enum Skill {
     SUN_STRIKE("Sun Strike", 0, 600),
     ECHO_SLAM("Echo Slam", 1, 700),
     LAGUNA_BLADE("Laguna Blade", 4, 800),
-    RUPTURE("Rupture", 2, 1000);
+    RUPTURE("Rupture", 2, 1000),
+    THUNDERGOD_WRATH("Thundergod's Wrath", 99, 1800),
+    FATAL_BONDS("Fatal Bonds", 99, 1800),
+    CHRONOSPHERE("Chronosphere", 99, 1800),
+    REAPER_SCYTHE("Reaper's Scythe", 99, 1800);
 
     public final String label;
     /** Minimum tier index (0 = Common) before this skill can appear. */
