@@ -62,7 +62,6 @@ public final class PlaceholderCompat {
             case "active" -> b != null ? "yes" : "no";
             case "hp" -> b != null ? String.valueOf(Math.round(100 * b.hp / b.maxHp)) : "0";
             case "tier" -> b != null ? b.tierName() : "-";
-            case "phase" -> b != null ? b.phase + "/" + b.phases : "-";
             case "next" -> {
                 long t = WGBosses.MANAGER.ticksUntilNext();
                 yield t < 0 ? "-" : (t / 1200 + 1) + "m";
