@@ -41,6 +41,8 @@ public final class Config {
         public List<String> ultimates = new ArrayList<>();
         /** Skills this tier never uses. */
         public List<String> disabledSkills = new ArrayList<>();
+        /** Chance (0-1) that a boss of this tier spawns with a hidden totem (revives it once, only at the end of phase 1). */
+        public double totemChance;
     }
 
     public static final class Event {
@@ -209,7 +211,7 @@ public final class Config {
     public int affixSecondMinTier = 3;
     public double affixSecondChance = 0.35;
     public List<String> affixPool = new ArrayList<>(List.of(
-            "SWIFT", "VAMPIRIC", "THORNED", "BERSERKER", "REGENERATING", "WARDED", "BLINKER", "TITAN"));
+            "SWIFT", "THORNED", "BERSERKER", "WARDED", "BLINKER", "TITAN"));
 
     // ---- enrage / wound / flight nerf ----
     public boolean enrageEnabled = true;
@@ -223,6 +225,27 @@ public final class Config {
     public double woundEnragedHealReducePercent = 100;
     /** Players near the boss can heal at most this % of max HP per second (lifesteal, regen, potions). */
     public double woundHealCapPercentPerSecond = 4;
+    /** Lifesteal-style healing (right after the player hits the boss) is cut by this much; other healing (apples, potions) is untouched. */
+    public double lifestealReducePercent = 60;
+    public double lifestealEnragedReducePercent = 80;
+    public double lifestealCapPercentPerSecond = 2;
+    /** A boss never heals more than this % of its max HP in a whole fight, and at most this many heal skills per phase. */
+    public double maxFightHealPercent = 25;
+    public int maxHealCastsPerPhase = 3;
+    public double retreatHealPct = 12;
+    /** If a hit would drop a player under 1 HP and they are under this % health, they die with this chance instead of surviving. */
+    public double halfHeartThresholdPercent = 30;
+    public double halfHeartDeathChance = 0.35;
+    /** Spawn countdown when no boss has just ended (minutes). The timer only runs while minPlayers+ are online. */
+    public int firstSpawnMinMinutes = 30;
+    public int firstSpawnMaxMinutes = 60;
+    /** Colourful, bold boss bar name (the [TIER] tag keeps its tier colour). */
+    public boolean fancyBossBarName = true;
+    /** Boss that stands still without any attack for this long falls back to the boss's own attacks. */
+    public double idleDetectSeconds = 2.5;
+    /** Mobs that always use the boss's own movement and attacks instead of their own AI (passive animals etc.). */
+    public List<String> customAiMobs = new ArrayList<>(List.of(
+            "minecraft:pig", "minecraft:cow", "minecraft:sheep", "minecraft:chicken", "minecraft:crab", "minecraft:rabbit"));
     public boolean woundEnabled = true;
     public double woundReducePercent = 50;
     public double woundEnragedReducePercent = 75;
@@ -349,6 +372,7 @@ public final class Config {
         int[] spMin = {100, 120, 140, 160, 180, 200, 240};
         int[] spMax = {120, 140, 160, 180, 200, 220, 260};
         double[] ember = {0, 0, 0, 0, 0.02, 0.04, 0.08};
+        double[] totem = {0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10};
         String[] ult = {"RAVAGE,ECHO_SLAM,SUN_STRIKE", "RAVAGE,ECHO_SLAM,SUN_STRIKE",
                 "WATERFOWL,EXECUTION_MARK,RUPTURE", "WATERFOWL,EXECUTION_MARK,RUPTURE",
                 "REVERSE_POLARITY,LAGUNA_BLADE,THUNDERGOD_WRATH,FATAL_BONDS,CHRONOSPHERE,REAPER_SCYTHE",
@@ -363,6 +387,7 @@ public final class Config {
             tiers.get(i).shardPlayerMin = spMin[i];
             tiers.get(i).shardPlayerMax = spMax[i];
             tiers.get(i).emberChance = ember[i];
+            tiers.get(i).totemChance = totem[i];
             tiers.get(i).ultimates = new ArrayList<>(Arrays.asList(ult[i].split(",")));
         }
         buildDefaultRewards();
@@ -449,9 +474,13 @@ public final class Config {
         if (c.arenas == null) c.arenas = new ArrayList<>();
         if (c.uniqueRewards == null) c.uniqueRewards = new ArrayList<>();
         if (c.events == null) c.events = new ArrayList<>();
+        if (c.customAiMobs == null) c.customAiMobs = d.customAiMobs;
         if (c.slayerBuffs == null) c.slayerBuffs = d.slayerBuffs;
         if (c.disabledSkills == null) c.disabledSkills = new ArrayList<>();
         if (c.discordWebhookUrl == null) c.discordWebhookUrl = "";
+        boolean anyTotem = false;
+        for (TierDef td : c.tiers) if (td.totemChance > 0) anyTotem = true;
+        if (!anyTotem) for (int i = 0; i < c.tiers.size() && i < d.tiers.size(); i++) c.tiers.get(i).totemChance = d.tiers.get(i).totemChance;
         boolean anyEmber = false;
         for (TierDef td : c.tiers) if (td.emberChance > 0) anyEmber = true;
         if (!anyEmber) for (int i = 0; i < c.tiers.size() && i < d.tiers.size(); i++) c.tiers.get(i).emberChance = d.tiers.get(i).emberChance;
