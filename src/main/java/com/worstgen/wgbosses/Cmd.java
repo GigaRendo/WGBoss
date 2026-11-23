@@ -281,8 +281,7 @@ public final class Cmd {
                         String s = !WGBosses.config.autoSpawn ? "Automatic spawns are OFF (/wgboss toggle)." : t < 0 ? "A boss is not scheduled right now." : "No boss active. Next one in about " + (t / 1200 + 1) + " min.";
                         c.getSource().sendSuccess(() -> Component.literal(s), false);
                     } else {
-                        String s = "[" + b.tierName() + "] " + b.baseName + " - Phase " + b.phase + "/" + b.phases
-                                + " - " + Math.round(100 * b.hp / b.maxHp) + "% HP";
+                        String s = "[" + b.tierName() + "] " + b.baseName + " - " + Math.round(100 * b.hp / b.maxHp) + "% HP";
                         c.getSource().sendSuccess(() -> Component.literal(s), false);
                     }
                     return 1;
