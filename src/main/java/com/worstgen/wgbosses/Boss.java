@@ -113,6 +113,7 @@ public final class Boss {
     private final List<ServerPlayer> wfTargets = new ArrayList<>();
     private final Map<UUID, double[]> dps = new HashMap<>();
     private int crowd;
+    private final Map<UUID, Long> lastHitBy = new HashMap<>();
     private final boolean hybrid;
     private int fallbacks;
     private final Map<UUID, double[]> healWin = new HashMap<>();
@@ -153,9 +154,14 @@ public final class Boss {
         this.hybrid = this.nativeAi && !(mob instanceof Enemy);
         Config.Arena ar = c.arenaEnabled ? c.arenaByName(s.arena) : null;
         this.arena = ar != null && level.dimension().identifier().toString().equals(ar.dimension) ? ar : null;
-        this.hasTotem = Util.chance(c.totemChance);
+        this.hasTotem = Util.chance(c.tiers.get(s.tier).totemChance);
         this.affixes = new ArrayList<>(s.affixes);
-        if (hybrid && mob.getAttribute(Attributes.ATTACK_DAMAGE) == null && !(mob instanceof RangedAttackMob)) customUntil = Long.MAX_VALUE;
+        if (hybrid && (mob.getAttribute(Attributes.ATTACK_DAMAGE) == null || mob.getAttributeValue(Attributes.ATTACK_DAMAGE) <= 0.01)
+                && !(mob instanceof RangedAttackMob)) customUntil = Long.MAX_VALUE;
+        if (nativeAi) {
+            var ek = BuiltInRegistries.ENTITY_TYPE.getKey(mob.getType());
+            if (ek != null && c.customAiMobs.contains(ek.toString())) customUntil = Long.MAX_VALUE;
+        }
         List<Skill> ults = new ArrayList<>();
         List<String> ul = c.tiers.get(s.tier).ultimates;
         if (ul != null) {
@@ -271,6 +277,9 @@ public final class Boss {
         Config c = WGBosses.config;
         if (!nativeAi && mob.isNoAi()) mob.setNoAi(false);
         clearEffects(mob);
+        if (now % 20 == 0 && !mob.hasEffect(MobEffects.FIRE_RESISTANCE)) {
+            mob.addEffect(new MobEffectInstance(MobEffects.FIRE_RESISTANCE, MobEffectInstance.INFINITE_DURATION, 0, false, false));
+        }
         if (!c.showBossFire) {
             if (mob.isOnFire()) mob.clearFire();
         } else if (mob.isOnFire()) {
@@ -288,7 +297,7 @@ public final class Boss {
 
     /** Heals the boss, respecting the per-fight cap and the current phase's top. Returns how much was healed. */
     public double heal(double amount) {
-        double room = maxHp * WGBosses.config.maxTotalHealPercent / 100.0 - healed;
+        double room = maxHp * WGBosses.config.maxFightHealPercent / 100.0 - healed;
         double top = maxHp * (phases - phase + 1) / phases;
         double a = Math.max(0, Math.min(amount, Math.min(room, top - hp)));
         hp += a;
@@ -460,7 +469,6 @@ public final class Boss {
 
     private void affixTick(long now) {
         if (affixes.isEmpty()) return;
-        if (affixes.contains("REGENERATING") && now % 20 == 0) heal(maxHp * 0.002);
         if (affixes.contains("WARDED") && now % 600 == 0 && cur == null && !invulnerable() && Util.chance(0.5)) {
             shieldUntil = now + 60;
             Util.sound(level, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.BEACON_ACTIVATE, 2f, 1.4f);
@@ -476,22 +484,23 @@ public final class Boss {
         }
     }
 
-    /** Players heal much less while fighting the boss (catches lifesteal, regen, potions). */
+    /** Lifesteal-style healing (right after hitting the boss) is cut hard; apples, potions and regen are left alone. */
     private void wound(List<ServerPlayer> ps) {
         Config c = WGBosses.config;
         if (!c.woundEnabled) { hpSeen.clear(); healWin.clear(); return; }
-        double red = (enraged ? c.woundEnragedHealReducePercent : c.woundHealReducePercent) / 100.0;
+        double red = (enraged ? c.lifestealEnragedReducePercent : c.lifestealReducePercent) / 100.0;
         Set<UUID> seen = new HashSet<>();
         for (ServerPlayer p : ps) {
             UUID u = p.getUUID();
             seen.add(u);
             float h = p.getHealth();
             Float last = hpSeen.get(u);
-            if (last != null && last > 0 && p.isAlive() && p.tickCount > 100 && h > last) {
+            Long lh = lastHitBy.get(u);
+            if (last != null && last > 0 && p.isAlive() && p.tickCount > 100 && h > last && lh != null && mgr.tick - lh <= 3) {
                 double gain = (h - last) * (1 - red);
                 double[] w = healWin.computeIfAbsent(u, k -> new double[]{mgr.tick, 0});
                 if (mgr.tick - w[0] >= 20) { w[0] = mgr.tick; w[1] = 0; }
-                double cap = p.getMaxHealth() * c.woundHealCapPercentPerSecond / 100.0;
+                double cap = p.getMaxHealth() * c.lifestealCapPercentPerSecond / 100.0;
                 gain = Math.min(gain, Math.max(0, cap - w[1]));
                 w[1] += gain;
                 h = (float) (last + gain);
@@ -574,9 +583,21 @@ public final class Boss {
         }
     }
 
+    private int healCasts, healCastPhase = -1;
+
+    private static boolean isHealSkill(Skill s) {
+        return s == Skill.MEND || s == Skill.REPRIEVE || s == Skill.LIFEBLOOM || s == Skill.HEART_HOVER
+                || s == Skill.RETREAT_HEAL || s == Skill.LIFE_DRAIN;
+    }
+
+    private boolean healAllowed() {
+        if (healCastPhase != phase) { healCastPhase = phase; healCasts = 0; }
+        return healCasts < WGBosses.config.maxHealCastsPerPhase;
+    }
+
     private boolean healable() {
         double top = maxHp * (phases - phase + 1) / phases;
-        return hp < top - maxHp * 0.05 && healed < maxHp * WGBosses.config.maxTotalHealPercent / 100.0 - 1;
+        return hp < top - maxHp * 0.05 && healed < maxHp * WGBosses.config.maxFightHealPercent / 100.0 - 1;
     }
 
     private boolean movingSkill() {
@@ -788,10 +809,32 @@ public final class Boss {
 
     public String tierName() { return phaseTier(phase).name; }
 
+    private static final ChatFormatting[][] NAME_PAL = {
+            {ChatFormatting.WHITE, ChatFormatting.GRAY},
+            {ChatFormatting.GREEN, ChatFormatting.YELLOW},
+            {ChatFormatting.RED, ChatFormatting.GOLD},
+            {ChatFormatting.LIGHT_PURPLE, ChatFormatting.AQUA},
+            {ChatFormatting.GOLD, ChatFormatting.YELLOW, ChatFormatting.RED},
+            {ChatFormatting.RED, ChatFormatting.GOLD, ChatFormatting.YELLOW, ChatFormatting.GREEN, ChatFormatting.AQUA, ChatFormatting.LIGHT_PURPLE},
+            {ChatFormatting.DARK_RED, ChatFormatting.RED}
+    };
+    private static final ChatFormatting[] ENRAGE_PAL = {ChatFormatting.RED, ChatFormatting.DARK_RED};
+
+    /** Boss bar title. Deliberately shows NO phase info, so a Calamity can't be told apart. */
     private Component barTitle() {
         String tn = tierName().toUpperCase(Locale.ROOT);
-        return Component.literal("[" + tn + "] ").withStyle(chatColor())
-                .append(Component.literal(baseName + " - Phase " + phase + "/" + phases).withStyle(ChatFormatting.WHITE));
+        if (!WGBosses.config.fancyBossBarName) {
+            return Component.literal("[" + tn + "] ").withStyle(chatColor())
+                    .append(Component.literal(namePrefix() + baseName).withStyle(ChatFormatting.WHITE));
+        }
+        net.minecraft.network.chat.MutableComponent t = Component.literal("[" + tn + "] ").withStyle(chatColor(), ChatFormatting.BOLD);
+        String nm = namePrefix() + baseName;
+        ChatFormatting[] pal = enraged ? ENRAGE_PAL : NAME_PAL[Math.max(0, Math.min(NAME_PAL.length - 1, displayTierIdx()))];
+        int shift = (rainbow || enraged) ? (int) (mgr.tick / 8) : 0;
+        for (int i = 0; i < nm.length(); i++) {
+            t.append(Component.literal(String.valueOf(nm.charAt(i))).withStyle(pal[(i + shift) % pal.length], ChatFormatting.BOLD));
+        }
+        return t;
     }
 
     private BossEvent.BossBarColor color() {
@@ -859,7 +902,13 @@ public final class Boss {
         double ratio = amount / Math.max(0.01, curDamage());
         double pct = phaseTier(phase).hitPercent * (calamity ? 1 : 1 + 0.2 * (phase - 1)) * dmgMult * powerMul() * crowdMul();
         double finalDmg = Math.max(1.0, p.getMaxHealth() * pct / 100.0 * ratio);
-        if (WGBosses.config.neverOneShot && p.getHealth() > 1.0f) finalDmg = Math.min(finalDmg, p.getHealth() - 1.0f);
+        if (WGBosses.config.neverOneShot && finalDmg >= p.getHealth()) {
+            boolean lowHp = p.getHealth() < p.getMaxHealth() * WGBosses.config.halfHeartThresholdPercent / 100.0;
+            if (!(lowHp && Util.chance(WGBosses.config.halfHeartDeathChance))) {
+                finalDmg = Math.max(0, p.getHealth() - 1.0f);
+                if (finalDmg < 0.05) return;
+            }
+        }
         DamageSource src = WGBosses.config.armorBypass ? level.damageSources().indirectMagic(mob, mob) : level.damageSources().mobAttack(mob);
         applying = true;
         try { p.hurtServer(level, src, (float) finalDmg); } finally { applying = false; }
@@ -875,7 +924,6 @@ public final class Boss {
                 try { o.hurtServer(level, src, (float) part); } finally { applying = false; }
             }
         }
-        if (affixes.contains("VAMPIRIC")) heal(maxHp * 0.005);
         if (mgr.tick < drainUntil) {
             heal(maxHp * WGBosses.config.lifeDrainHealPercent / 100.0);
             sp(ParticleTypes.HEART, mob.getX(), mob.getY() + mob.getBbHeight() * 0.8, mob.getZ(), 2, 0.3, 0.3, 0.3, 0.02);
@@ -949,6 +997,7 @@ public final class Boss {
         hp -= amt;
         if (attacker != null) {
             damage.merge(attacker.getUUID(), eff, Double::sum);
+            lastHitBy.put(attacker.getUUID(), mgr.tick);
             double[] dd = dbg.computeIfAbsent(attacker.getUUID(), k -> new double[3]);
             dd[0] += amount;
             dd[1] += eff;
@@ -960,8 +1009,8 @@ public final class Boss {
         }
         if (hp <= floor) {
             hp = floor;
-            if (phase < phases) startTransition();
-            else if (hasTotem) popTotem();
+            if (hasTotem && phase == 1) popTotem();
+            else if (phase < phases) startTransition();
             else mgr.onBossKilled(this, attacker);
             return false;
         }
@@ -997,8 +1046,6 @@ public final class Boss {
         hasTotem = false;
         endSkillNow();
         if (phases > 1) {
-            phase--;
-            applyPhase(phase);
             hp = lower(phase) + maxHp / phases * WGBosses.config.totemRefillPercent / 100.0;
         } else {
             hp = maxHp * 0.5;
@@ -1073,7 +1120,7 @@ public final class Boss {
         if (now >= despawnAt) { mgr.despawn(this); return; }
         if (now % 5 == 0) refreshBar();
         if (now % 20 == 0) syncBar();
-        if (rainbow && now % 8 == 0) bar.setColor(color());
+        if ((rainbow || enraged) && now % 8 == 0) { bar.setColor(color()); bar.setName(barTitle()); }
 
         if (transition > 0) { tickTransition(); return; }
 
@@ -1225,9 +1272,10 @@ public final class Boss {
         // Neutral / brain mobs may refuse to attack: after a short while, fall back to the boss's own attacks for a while.
         double dist3 = mob.distanceTo(target);
         if (!hybrid && refuse >= 60 && dist3 < 48) { customUntil = now + 300; refuse = 0; return; }
-        if (now - passCheck >= 80) {
+        long idle = Math.max(20, (long) (WGBosses.config.idleDetectSeconds * 20));
+        if (now - passCheck >= idle) {
             double moved = passPos == null ? 99 : Util.flat(mob.getX(), mob.getZ(), passPos.x, passPos.z);
-            if (now - lastNativeHit > 80 && moved < 1.5 && dist3 < 32) {
+            if (now - lastNativeHit > idle && moved < 1.5 && dist3 < 32) {
                 fallbacks++;
                 customUntil = hybrid && fallbacks >= 2 ? Long.MAX_VALUE : now + 300;
                 return;
@@ -1386,8 +1434,8 @@ public final class Boss {
             case TELEPORT -> d > 4;
             case DASH -> d > 5;
             case POWER_SHIELD -> !invulnerable();
-            case MEND, REPRIEVE, LIFEBLOOM, HEART_HOVER -> healable();
-            case RETREAT_HEAL -> healable() && !retreatUsed.contains(phase);
+            case MEND, REPRIEVE, LIFEBLOOM, HEART_HOVER -> healable() && healAllowed();
+            case RETREAT_HEAL -> healable() && healAllowed() && !retreatUsed.contains(phase);
             case INVIS_SPLASH -> invisUntil == 0;
             case SHULKER_BOLT -> d <= 40 && bolts.size() < 4;
             case SPLASH_POISON, SPLASH_WITHER, SPLASH_HARMING, SPLASH_LEVITATION, SPLASH_SLOWNESS, SPLASH_BLINDNESS -> d <= 40;
@@ -1395,7 +1443,7 @@ public final class Boss {
             case POWER_UP -> mgr.tick >= powerUntil;
             case FATAL_BONDS -> now >= bondUntil && ps.size() >= 2;
             case CHRONOSPHERE -> now >= chronoUntil;
-            case LIFE_DRAIN -> mgr.tick >= drainUntil && healable();
+            case LIFE_DRAIN -> mgr.tick >= drainUntil && healable() && healAllowed();
             case EXECUTION_MARK -> d <= 48;
             case REVERSE_POLARITY -> d <= 32;
             case ECHO_SLAM -> d <= 16;
@@ -1443,6 +1491,7 @@ public final class Boss {
     }
 
     private void startSkill(Skill s, long now, List<ServerPlayer> ps, boolean ult) {
+        if (isHealSkill(s)) { healAllowed(); healCasts++; }
         cur = s;
         skillT = 0;
         Config hc = WGBosses.config;
@@ -1719,7 +1768,7 @@ public final class Boss {
                     mob.setDeltaMovement(awayDir.x * 1.1, flyer ? 0 : mob.getDeltaMovement().y, awayDir.z * 1.1);
                     puff(ParticleTypes.CLOUD, 6);
                 } else if (skillT == 46) {
-                    heal(maxHp * cfg.retreatHealPercent / 100.0);
+                    heal(maxHp * cfg.retreatHealPct / 100.0);
                     sp(ParticleTypes.HEART, x, y + mob.getBbHeight() * 0.8, z, 25, size * 0.5, 0.6, size * 0.5, 0.02);
                     Util.sound(level, x, y, z, SoundEvents.BEACON_POWER_SELECT, 2f, 1.2f);
                 } else if (skillT >= 60) endSkill(now);
