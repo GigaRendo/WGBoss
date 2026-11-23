@@ -128,7 +128,7 @@ public final class BossManager {
 
     public void scheduleNext() {
         Config c = cfg();
-        int mn = c.spawnMinMinutes, mx = c.spawnMaxMinutes;
+        int mn = c.firstSpawnMinMinutes, mx = Math.max(c.firstSpawnMinMinutes, c.firstSpawnMaxMinutes);
         if (c.tierCooldowns && endedTier >= 0 && endedTier < c.tiers.size() && c.tiers.get(endedTier).cooldownMaxMinutes > 0) {
             mn = c.tiers.get(endedTier).cooldownMinMinutes;
             mx = Math.max(mn, c.tiers.get(endedTier).cooldownMaxMinutes);
@@ -296,6 +296,7 @@ public final class BossManager {
 
         if (nextSpawn < 0) scheduleNext();
         if (paused && nextSpawn != Long.MAX_VALUE) nextSpawn++;
+        else if (bosses.isEmpty() && nextSpawn != Long.MAX_VALUE && server.getPlayerList().getPlayerCount() < c.minPlayers) nextSpawn++;
         if (!itemsChecked && tick > 100) { itemsChecked = true; checkItems(); }
         if (tick % 20 == 0) {
             try { tickEvents(); } catch (Throwable t) { WGBosses.LOG.error("Event check failed", t); }
@@ -443,6 +444,8 @@ public final class BossManager {
         s.personality = Util.pick(PERSONALITIES);
         if (c.affixesEnabled && s.tier >= c.affixMinTier && !c.affixPool.isEmpty() && Util.chance(c.affixChance)) {
             List<String> pl = new ArrayList<>(c.affixPool);
+            pl.removeIf(n -> n.equalsIgnoreCase("REGENERATING") || n.equalsIgnoreCase("VAMPIRIC"));
+            if (pl.isEmpty()) return s;
             s.affixes.add(pl.remove(Util.rint(0, pl.size() - 1)));
             if (s.tier >= c.affixSecondMinTier && !pl.isEmpty() && Util.chance(c.affixSecondChance)) s.affixes.add(pl.remove(Util.rint(0, pl.size() - 1)));
         }
@@ -660,7 +663,7 @@ public final class BossManager {
         } else {
             title = Component.literal("PHASE " + p).withStyle(b.chatColor(), ChatFormatting.BOLD);
             sub = Component.literal(b.baseName + " grows stronger!").withStyle(ChatFormatting.WHITE);
-            Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" entered PHASE " + p + "/" + b.phases + "!!").withStyle(ChatFormatting.RED)));
+            Util.broadcast(server, prefix().append(b.displayName()).append(Component.literal(" entered PHASE " + p + "!!").withStyle(ChatFormatting.RED)));
         }
         Util.titleAll(server, title, sub, 5, 50, 15);
         Util.soundAll(server, SoundEvents.ENDER_DRAGON_GROWL, 0.8f, 0.9f);
